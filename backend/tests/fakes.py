@@ -2,11 +2,14 @@
 
 from typing import Any
 
+from sparring_partner.llm import StructuredOutputError
+
 
 class FakeLLM:
     """Scripted structured replies, keyed by the requested schema's class name.
 
     A reply may be a dict or a callable taking the messages and returning a dict.
+    An empty queue raises StructuredOutputError, like a model that keeps failing.
     """
 
     def __init__(self, **replies: list[Any]):
@@ -16,8 +19,10 @@ class FakeLLM:
     async def complete_json(self, role, messages, schema, **kwargs):
         self.calls.append((role, schema.__name__, list(messages)))  # callers may extend it
         queue = self.replies.get(schema.__name__)
-        if not queue:
+        if queue is None:
             raise AssertionError(f"unexpected {schema.__name__} request")
+        if not queue:  # scripted to run dry: behave like a model that never gets it right
+            raise StructuredOutputError(f"{schema.__name__}: no valid reply")
         reply = queue.pop(0)
         return schema.model_validate(reply(messages) if callable(reply) else reply)
 
@@ -74,4 +79,22 @@ INPUT_SPEC = {
         {"args": "([[1, 3], [2, 4]],)", "output": "[[1, 4]]"},
         {"args": "([],)", "output": "[]"},
     ],
+}
+
+# The reference fix for MERGE_CODE: sort first, and merge touching intervals.
+FIXED_MERGE = MERGE_CODE.replace(
+    "    merged = [list(intervals[0])]\n",
+    "    intervals = sorted(intervals)\n    merged = [list(intervals[0])]\n",
+).replace("if start < merged", "if start <= merged")
+# Fixes only the comparison; unsorted input still loses intervals.
+HALF_FIXED_MERGE = MERGE_CODE.replace("if start < merged", "if start <= merged")
+BUG_LINE = 7  # `if start < merged[-1][1]:`
+
+DIAGNOSIS = {
+    "root_cause": "SECRET_ROOT_CAUSE: the strict < treats touching intervals as separate",
+    "line": BUG_LINE,
+    "region": "the for loop in merge_intervals",
+    "bug_class": "boundary condition",
+    "concept": "SECRET_CONCEPT: intervals that share an endpoint overlap",
+    "reference_fix": FIXED_MERGE,
 }

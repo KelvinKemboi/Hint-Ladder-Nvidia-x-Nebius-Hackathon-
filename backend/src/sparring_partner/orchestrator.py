@@ -6,6 +6,7 @@ from collections.abc import Coroutine
 from typing import Any
 
 from sparring_partner.agents.code_info import FunctionInfo, pick_function
+from sparring_partner.agents.diagnosis import Diagnoser
 from sparring_partner.agents.errors import GenerationError, UserCodeError
 from sparring_partner.agents.properties import PropertyProposer, PropertyValidationError
 from sparring_partner.agents.testgen import (
@@ -44,6 +45,12 @@ class Orchestrator:
         self.sandbox = sandbox
         self.settings = settings or get_settings()
         self.proposer = PropertyProposer(llm, sandbox)
+        self.diagnoser = Diagnoser(
+            llm,
+            sandbox,
+            max_examples=self.settings.explore_max_examples,
+            call_timeout_s=self.settings.explore_call_timeout_s,
+        )
         self._tasks: set[asyncio.Task[Any]] = set()
 
     async def create(
@@ -148,7 +155,25 @@ class Orchestrator:
             f"Found {found} distinct failure(s)" if found else "No failures found",
             failures=found,
         )
+        if found:
+            await self._diagnose(session)
         self._move(session, S.PREDICTING if found else S.POSTMORTEM)
+
+    async def _diagnose(self, session: Session) -> None:
+        """Work out the private diagnosis. Failure here doesn't stop the session."""
+        self._progress(session, "Working out the root cause")
+        try:
+            session.trace = await self.diagnoser.trace(session)
+            session.diagnosis = await self.diagnoser.diagnose(session)
+        except Exception:
+            logger.exception("diagnosis failed for session %s", session.id)
+            # No details: the error text could describe the bug.
+            self.store.publish(session.id, "error", "Could not work out a diagnosis")
+            return
+        if session.diagnosis.verified:
+            self._progress(session, "Root cause found and fix verified")
+        else:
+            self._progress(session, "Root cause found, but the fix could not be verified")
 
     async def wait_idle(self) -> None:
         """Wait for background work (exploration) to finish."""

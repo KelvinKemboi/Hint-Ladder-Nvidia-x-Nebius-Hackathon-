@@ -15,7 +15,7 @@ from sparring_partner.agents.testgen import (
     edge_cases,
     predicate_check_harness,
 )
-from sparring_partner.llm import Message
+from sparring_partner.llm import Message, StructuredOutputError
 from sparring_partner.sandbox import Sandbox
 from sparring_partner.session import PropertySpec, Session
 
@@ -89,8 +89,11 @@ class PropertyProposer:
         """Validate drafts, repair broken predicates once, and drop any still broken."""
         errors = await self.validate(session, drafts)
         if errors:
-            drafts = await self._repair(session, fn, drafts, errors)
-            errors = await self.validate(session, drafts)
+            try:
+                drafts = await self._repair(session, fn, drafts, errors)
+                errors = await self.validate(session, drafts)
+            except (StructuredOutputError, PropertyValidationError) as exc:
+                logger.warning("property repair failed, keeping the valid ones: %s", exc)
         for p in drafts:
             if p.id in errors:
                 logger.warning("dropping property %r: %s", p.statement, errors[p.id])

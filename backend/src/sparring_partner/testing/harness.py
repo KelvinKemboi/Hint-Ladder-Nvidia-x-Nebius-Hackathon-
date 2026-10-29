@@ -7,6 +7,7 @@ Everything here returns plain JSON-able dicts so results travel back intact.
 
 import ast
 import copy
+import sys
 from collections.abc import Callable
 from typing import Any
 
@@ -182,3 +183,46 @@ def explore(
         "edge_cases": len(config["edge_cases"]),
         "max_examples": config["max_examples"],
     }
+
+
+def trace_call(solution: Any, config: dict[str, Any]) -> dict[str, Any]:
+    """Run one call and record the line and local variables at each step in the user's code.
+
+    Each step is the state *before* that line runs. Values are short reprs.
+    """
+    fn = getattr(solution, config["function"])
+    filename = fn.__code__.co_filename
+    max_steps = config.get("max_steps", 200)
+    steps: list[dict[str, Any]] = []
+
+    def local_trace(frame: Any, event: str, arg: Any) -> Any:
+        if event == "line" and len(steps) < max_steps:
+            steps.append(
+                {
+                    "line": frame.f_lineno,
+                    "function": frame.f_code.co_name,
+                    "locals": {k: _short(v) for k, v in frame.f_locals.items()},
+                }
+            )
+        return local_trace
+
+    def global_trace(frame: Any, event: str, arg: Any) -> Any:
+        return local_trace if frame.f_code.co_filename == filename else None
+
+    sys.settrace(global_trace)
+    try:
+        outcome = _call(fn, _as_args(config["args"]), config.get("call_timeout_s"))
+    finally:
+        sys.settrace(None)
+    exc = outcome.exception
+    return {
+        "steps": steps,
+        "truncated": len(steps) >= max_steps,
+        "output": None if exc else _short(outcome.output),
+        "exception": f"{type(exc).__name__}: {exc}" if exc else None,
+    }
+
+
+def _short(value: Any, limit: int = 80) -> str:
+    text = repr(value)
+    return text if len(text) <= limit else text[: limit - 3] + "..."

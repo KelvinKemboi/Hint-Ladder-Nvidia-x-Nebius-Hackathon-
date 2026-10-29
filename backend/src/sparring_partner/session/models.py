@@ -75,6 +75,8 @@ class Diagnosis:
     bug_class: str
     concept: str
     reference_fix: str
+    verified: bool = False  # the fix passed every test in the sandbox
+    attempts: int = 1
 
 
 @dataclass
@@ -96,6 +98,7 @@ class Session:
     worked_examples: list[tuple[Any, Any]] = field(default_factory=list)  # (args, correct output)
     strategy_code: str | None = None
     counterexamples: list[dict[str, Any]] = field(default_factory=list)  # revealed one at a time
+    trace: dict[str, Any] | None = None # locals per line for the top counterexample
     diagnosis: Diagnosis | None = None
 
     messages: list[dict[str, Any]] = field(default_factory=list)  # gate-approved only

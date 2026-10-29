@@ -3,6 +3,7 @@ import time
 import pytest
 from fakes import (
     COVERED,
+    DIAGNOSIS,
     INPUT_SPEC,
     INTERVALS_STRATEGY,
     MERGE_CODE,
@@ -18,7 +19,7 @@ from sparring_partner.config import Settings
 from sparring_partner.main import app
 from sparring_partner.orchestrator import Orchestrator
 from sparring_partner.sandbox import LocalBackend, Sandbox
-from sparring_partner.session import Diagnosis, SessionStore
+from sparring_partner.session import SessionStore
 
 SETTINGS = Settings(_env_file=None, explore_max_examples=60, sandbox_timeout_s=60)
 # Fields that must never reach the client.
@@ -26,6 +27,7 @@ SERVER_ONLY = {
     "diagnosis",
     "counterexamples",
     "strategy_code",
+    "trace",
     "worked_examples",
     "gate_log",
     "reference_fix",
@@ -47,6 +49,7 @@ def merge_llm(**extra) -> FakeLLM:
         "Proposal": [{"properties": [prop(NO_OVERLAP), prop(COVERED), prop(SORTED), prop(FEWER)]}],
         "Predicates": [{"properties": [prop(FEWER_FIXED)]}],  # the repair
         "StrategyDraft": [{"code": "def strategy(:\n"}, {"code": INTERVALS_STRATEGY}],
+        "DiagnosisDraft": [DIAGNOSIS],
     }
     for name, queue in extra.items():
         replies[name] = replies.get(name, []) + queue
@@ -124,6 +127,16 @@ def test_properties_still_broken_after_repair_are_dropped(make_client):
     assert FEWER[0] not in statements and len(statements) == 3
 
 
+def test_failed_repair_keeps_the_valid_properties(make_client):
+    llm = merge_llm()
+    llm.replies["Predicates"] = []  # the repair call fails outright
+    client, _ = make_client(llm)
+
+    statements = [p["statement"] for p in create(client)["properties"]]
+
+    assert statements == [NO_OVERLAP[0], COVERED[0], SORTED[0]]
+
+
 def test_code_that_does_not_parse_is_rejected(make_client):
     client, _ = make_client(FakeLLM())
     response = client.post("/api/sessions", json={"code": "def f(:\n", "intent": "anything"})
@@ -174,6 +187,26 @@ def test_confirm_edits_regenerates_and_explores(make_client):
     assert "Writing an input generator" in events
     assert any(m.startswith("Testing 3 properties on 60 generated inputs") for m in events)
     assert "Found 2 distinct failure(s)" in events
+    assert "Root cause found and fix verified" in events
+    assert session.diagnosis.verified and session.diagnosis.line == 7
+    # The deep model did the diagnosis; everything else used the fast model.
+    assert {role for role, name, _ in llm.calls if name == "DiagnosisDraft"} == {"deep"}
+
+
+def test_failed_diagnosis_does_not_block_the_session(make_client):
+    llm = merge_llm()
+    llm.replies["DiagnosisDraft"] = []  # the model call fails
+    client, orchestrator = make_client(llm)
+    body = create(client)
+    keep = [{"id": p["id"], "statement": p["statement"]} for p in body["properties"]]
+    client.put(f"/api/sessions/{body['id']}/properties", json={"properties": keep})
+
+    final = wait_for_state(client, body["id"], {"predicting", "properties_confirmed"})
+
+    assert final["state"] == "predicting"
+    assert orchestrator.store.get(body["id"]).diagnosis is None
+    errors = [e.message for e in orchestrator.store.history(body["id"]) if e.type == "error"]
+    assert errors == ["Could not work out a diagnosis"]
 
 
 def test_edit_whose_predicate_cannot_be_fixed_is_a_422(make_client):
@@ -262,20 +295,15 @@ def test_diagnosis_and_counterexamples_never_reach_the_client(make_client):
         ):
             events.append(ws.receive_json())
     session = orchestrator.store.get(body["id"])
-    session.diagnosis = Diagnosis(
-        root_cause="SECRET_ROOT_CAUSE",
-        line=7,
-        region="the merge loop",
-        bug_class="boundary condition",
-        concept="touching intervals overlap",
-        reference_fix="SECRET_FIX: if start <= merged[-1][1]:",
-    )
+    assert session.diagnosis is not None and session.diagnosis.verified
+    assert session.trace is not None
 
     texts = [client.get(f"/api/sessions/{body['id']}").text, str(events)]
     texts += [e.message for e in orchestrator.store.history(body["id"])]
     leaked = [ce["call"] for ce in session.counterexamples] + [
         ce["output"] for ce in session.counterexamples
     ]
+    leaked += ["intervals = sorted(intervals)", "reference_fix", "root_cause", "steps"]
     for text in texts:
         assert "SECRET" not in text
         for secret in leaked:
