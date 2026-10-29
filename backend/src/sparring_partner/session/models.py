@@ -101,8 +101,11 @@ class Session:
     trace: dict[str, Any] | None = None  # locals per line for the top counterexample
     evidence: dict[str, Any] | None = None  # the trace windowed for level 3
     current_case: int = 0  # which counterexample is being worked on
+    findings: list[dict[str, Any]] = field(default_factory=list)  # review mode, with details
     diagnosis: Diagnosis | None = None
 
+    original_code: str = ""  # as first submitted; `code` follows the learner's fixes
+    solved_cases: list[dict[str, Any]] = field(default_factory=list)  # for the post-mortem
     messages: list[dict[str, Any]] = field(default_factory=list)  # gate-approved only
     gate_log: list[dict[str, Any]] = field(default_factory=list)
     fix_attempts: list[dict[str, Any]] = field(default_factory=list)
@@ -120,6 +123,13 @@ class Session:
         if level > MAX_HINT_LEVEL:
             raise ValueError(f"hint level is at most {MAX_HINT_LEVEL}")
         self._hint_level = level
+
+    def reset_ladder(self) -> None:
+        """A new failing case starts a new hint ladder: levels only rise within a case."""
+        self._hint_level = 0
+
+    def __post_init__(self) -> None:
+        self.original_code = self.original_code or self.code
 
     def climb_hint(self) -> int:
         self.hint_level += 1

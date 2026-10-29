@@ -93,6 +93,36 @@ class PredictionOut(BaseModel):
     hint_level: int
 
 
+class FixIn(BaseModel):
+    code: str = Field(min_length=1, max_length=50_000)
+
+
+class FixOut(BaseModel):
+    outcome: str  # passed, failed, special_cased, invalid
+    message: str
+    inputs_checked: int
+    state: SessionState
+    hint_level: int
+    next_question: str | None = None  # after a pass: the next risk to think about
+
+
+class CaseOut(BaseModel):
+    call: str
+    bug_class: str | None
+    hint_level: int
+
+
+class PostmortemOut(BaseModel):
+    bug_class: str | None
+    bug_classes: list[str | None]
+    how_to_spot: str
+    other_edge_cases: list[str]
+    hint_level_reached: int
+    fix_attempts: int
+    inputs_checked: int
+    cases: list[CaseOut]
+
+
 class HintOut(BaseModel):
     level: int
     text: str
@@ -211,6 +241,20 @@ async def next_hint(session_id: str, orchestrator: OrchestratorDep) -> HintOut:
     """Climb one level of the hint ladder (1 symptom ... 5 line)."""
     with _errors():
         return HintOut(**await orchestrator.next_hint(session_id))
+
+
+@router.post("/{session_id}/fix")
+async def submit_fix(session_id: str, body: FixIn, orchestrator: OrchestratorDep) -> FixOut:
+    """Verify a fix: all property tests, N fresh inputs, and checks for special-casing."""
+    with _errors():
+        return FixOut(**await orchestrator.submit_fix(session_id, body.code))
+
+
+@router.get("/{session_id}/postmortem")
+async def get_postmortem(session_id: str, orchestrator: OrchestratorDep) -> PostmortemOut:
+    """Bug class, how to spot it next time, other edge cases, hints and attempts used."""
+    with _errors():
+        return PostmortemOut(**await orchestrator.postmortem(session_id))
 
 
 @router.get("/{session_id}/gate-log", include_in_schema=False)

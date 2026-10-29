@@ -11,6 +11,7 @@ from sparring_partner.agents.diagnosis import Diagnoser, counterexample_args
 from sparring_partner.agents.errors import GenerationError, NotAvailable, UserCodeError
 from sparring_partner.agents.gate import HintGate
 from sparring_partner.agents.hints import HintWriter
+from sparring_partner.agents.postmortem import write_postmortem
 from sparring_partner.agents.predict import (
     Prediction,
     current_case,
@@ -19,6 +20,7 @@ from sparring_partner.agents.predict import (
     question,
 )
 from sparring_partner.agents.properties import PropertyProposer, PropertyValidationError
+from sparring_partner.agents.review import Finding, Reviewer
 from sparring_partner.agents.testgen import (
     JsonLLM,
     edge_cases,
@@ -26,6 +28,7 @@ from sparring_partner.agents.testgen import (
     infer_inputs,
     write_strategy,
 )
+from sparring_partner.agents.verify import FixReport, FixVerifier, next_risk
 from sparring_partner.config import Settings, get_settings
 from sparring_partner.sandbox import Sandbox
 from sparring_partner.session import (
@@ -64,6 +67,11 @@ class Orchestrator:
         )
         self.gate = HintGate(llm, sandbox, call_timeout_s=self.settings.explore_call_timeout_s)
         self.hints = HintWriter(llm, self.gate, self.diagnoser)
+        timeout = self.settings.explore_call_timeout_s
+        self.verifier = FixVerifier(
+            sandbox, max_examples=self.settings.verify_examples, call_timeout_s=timeout
+        )
+        self.reviewer = Reviewer(llm, sandbox, call_timeout_s=timeout)
         self._tasks: set[asyncio.Task[Any]] = set()
 
     async def create(
@@ -162,6 +170,7 @@ class Orchestrator:
             self._move(session, S.PROPERTIES_CONFIRMED)
             return
 
+        findings = await self._review(session) if session.mode is Mode.REVIEW else []
         found = len(session.counterexamples)
         self._progress(
             session,
@@ -170,7 +179,24 @@ class Orchestrator:
         )
         if found:
             await self._diagnose(session)
+        # After the diagnosis, so the gate knows what must stay secret.
+        for finding in findings:
+            await self._ask(session, finding.question, kind="review", llm=finding.llm_written)
         self._move(session, S.PREDICTING if found else S.POSTMORTEM)
+
+    async def _review(self, session: Session) -> list[Finding]:
+        """AI Code Review mode: static checks, input assumptions, intent conformance."""
+        self._progress(session, "Reviewing the code for common AI-code mistakes")
+        try:
+            findings = await self.reviewer.review(session)
+        except Exception:
+            logger.exception("review failed for session %s", session.id)
+            self.store.publish(session.id, "error", "Could not finish the code review")
+            return []
+        self._progress(
+            session, f"The review raised {len(findings)} question(s)", count=len(findings)
+        )
+        return findings
 
     async def _diagnose(self, session: Session) -> None:
         """Work out the private diagnosis. Failure here doesn't stop the session."""
@@ -194,9 +220,8 @@ class Orchestrator:
         session = self.store.get(session_id)
         _require(session, S.PREDICTING, S.HINTING)
         text = question(session)
-        asked = any(
-            m["kind"] == "question" and m["case"] == session.current_case for m in session.messages
-        )
+        call = current_case(session)["call"]
+        asked = any(m["kind"] == "question" and call in m["text"] for m in session.messages)
         if not asked:
             await self._say(session, [text], kind="question")
         return {"question": text, "call": current_case(session)["call"]}
@@ -300,6 +325,143 @@ class Orchestrator:
         self._record(session, "coach", "hint", text, level=level)
         return {"level": level, "text": text}
 
+    # Fix verification and the post-mortem 
+    async def submit_fix(self, session_id: str, code: str) -> dict[str, Any]:
+        """Verify a fix; a new failure starts the predict -> hint loop again."""
+        session = self.store.get(session_id)
+        _require(session, S.PREDICTING, S.HINTING)
+        before = session.state
+        self._record(session, "user", "fix", "Submitted a fix")
+        self._move(session, S.VERIFYING)
+        self._progress(
+            session,
+            f"Checking your fix on {self.settings.verify_examples} fresh inputs per property",
+        )
+        report = await self.verifier.verify(session, code)
+        session.fix_attempts.append(
+            {
+                "code": code,
+                "outcome": report.outcome,
+                "reason": report.reason,
+                "inputs_checked": report.inputs_checked,
+                "at": time.time(),
+            }
+        )
+        if report.outcome == "passed":
+            return await self._fix_passed(session, code, report)
+        if report.counterexamples:
+            return await self._fix_failed(session, code, report)
+
+        self._move(session, before)  # same case: invalid, crashed, or hard-coded
+        if report.hardcoded:
+            shown = ", ".join(f"`{v}`" for v in report.hardcoded)
+            texts = [
+                f"Your fix mentions the exact failing input ({shown}). "
+                "Fix the cause rather than that one case."
+            ]
+        elif report.outcome == "invalid":
+            texts = [f"That fix can't be checked: {report.reason}.", "That fix can't be checked."]
+        else:
+            texts = [f"Not yet: {report.reason}."]
+        message = await self._say(session, texts, kind="fix_result")
+        return _fix_out(session, report, message)
+
+    async def _fix_passed(self, session: Session, code: str, report: FixReport) -> dict[str, Any]:
+        self._close_case(session)
+        session.code = code
+        self._move(session, S.POSTMORTEM)
+        message = await self._say(
+            session,
+            [
+                "Your fix holds: every property passed on the original failing inputs and "
+                f"{report.inputs_checked} generated ones."
+            ],
+            kind="fix_result",
+        )
+        await self._write_postmortem(session)
+        return _fix_out(session, report, message, next_question=await self._next_risk(session))
+
+    async def _fix_failed(self, session: Session, code: str, report: FixReport) -> dict[str, Any]:
+        solved = report.outcome == "failed" and session.current_case not in report.original_failures
+        if solved:
+            self._close_case(session)
+        session.code = code
+        self._start_case(session, report.counterexamples)
+        self._move(session, S.PREDICTING)
+        call = current_case(session)["call"]
+        if report.outcome == "special_cased":
+            lead = "Your fix handles the exact failing input, but not ones just like it."
+        elif solved:
+            lead = "That one's fixed, but your spec still breaks on another input."
+        else:
+            lead = "Not yet: your spec still breaks."
+        message = await self._say(
+            session, [f"{lead} What should `{call}` return?"], kind="question"
+        )
+        self._start(self._diagnose(session))
+        return _fix_out(session, report, message)
+
+    async def _next_risk(self, session: Session) -> str | None:
+        """After a pass: one risk the tests may not cover. If the code fails it, it
+        becomes the next failing case, and the session continues."""
+        try:
+            risk, ce = await next_risk(
+                self.llm, self.sandbox, session, call_timeout_s=self.settings.explore_call_timeout_s
+            )
+        except Exception:
+            logger.exception("next risk failed for session %s", session.id)
+            return None
+        if ce is None:
+            return risk if await self._ask(session, risk, kind="risk", llm=True) else None
+        self._start_case(session, [ce])
+        self._move(session, S.PREDICTING)
+        text = f"{risk} Predict: what should `{ce['call']}` return?"
+        if not await self._ask(session, text, kind="question", llm=True):
+            text = await self._say(session, [question(session)], kind="question")
+        self._start(self._diagnose(session))
+        return text
+
+    async def postmortem(self, session_id: str) -> dict[str, Any]:
+        session = self.store.get(session_id)
+        if session.postmortem is None:
+            if session.state is not S.POSTMORTEM:
+                raise NotAvailable("the post-mortem comes once your fix is verified")
+            await self._write_postmortem(session)
+        if session.postmortem is None:
+            raise GenerationError("could not write the post-mortem")
+        return session.postmortem
+
+    async def _write_postmortem(self, session: Session) -> None:
+        try:
+            session.postmortem = await write_postmortem(self.llm, session)
+        except Exception:
+            logger.exception("post-mortem failed for session %s", session.id)
+
+    def _close_case(self, session: Session) -> None:
+        d = session.diagnosis
+        session.solved_cases.append(
+            {
+                "call": current_case(session)["call"],
+                "bug_class": d.bug_class if d else None,
+                "root_cause": d.root_cause if d else None,
+                "hint_level": session.hint_level,
+            }
+        )
+
+    def _start_case(self, session: Session, counterexamples: list[dict[str, Any]]) -> None:
+        """A new failing case: new hint ladder, and the diagnosis is worked out again."""
+        session.counterexamples = counterexamples
+        session.current_case = 0
+        session.reset_ladder()
+        session.trace = session.evidence = session.diagnosis = None
+
+    async def _ask(self, session: Session, text: str, *, kind: str, llm: bool) -> bool:
+        """Send `text` if the gate allows it (model layer for model-written text); else drop it."""
+        decision = await self.gate.check(session, text, session.hint_level, kind=kind, use_llm=llm)
+        if decision.allowed:
+            self._record(session, "coach", kind, text)
+        return decision.allowed
+
     async def _say(self, session: Session, texts: list[str], *, kind: str) -> str:
         """Send the first of `texts` the gate allows (fixed templates: no model layer)."""
         for text in texts:
@@ -368,3 +530,16 @@ def _spec_reminder(session: Session, result: dict[str, Any], prediction: Predict
         f'Re-read the intent: "{session.intent}". '
         f"What should a correct {session.function}() return?"
     )
+
+
+def _fix_out(
+    session: Session, report: FixReport, message: str, *, next_question: str | None = None
+) -> dict[str, Any]:
+    return {
+        "outcome": report.outcome,
+        "message": message,
+        "inputs_checked": report.inputs_checked,
+        "state": session.state.value,
+        "hint_level": session.hint_level,
+        "next_question": next_question,
+    }

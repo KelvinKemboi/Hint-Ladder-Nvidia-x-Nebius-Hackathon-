@@ -1,0 +1,238 @@
+"""Fix verification, and the next untested risk once a fix holds.
+
+A fix passes only if the whole bug hunt finds nothing with a fresh seed (N new
+inputs per property, plus the edge cases and every original counterexample),
+and it doesn't special-case the failing input: no counterexample values newly
+hard-coded in the diff, and no failures on inputs right next to the
+counterexamples (every integer shifted a little).
+"""
+
+import ast
+import difflib
+import random
+from dataclasses import dataclass, field
+from typing import Any
+
+from pydantic import BaseModel, Field
+
+from sparring_partner.agents.code_info import find_functions
+from sparring_partner.agents.diagnosis import counterexample_args
+from sparring_partner.agents.testgen import JsonLLM, _literal_args, edge_cases
+from sparring_partner.llm import Message
+from sparring_partner.sandbox import Sandbox
+from sparring_partner.session import Session
+
+SHIFTS = (1, 2, 3, 7, -1, -4)
+TRIVIAL = {"0", "1", "-1", "2", "True", "False", "None", "''", "[]", "()", "{}", "0.0"}
+
+
+@dataclass
+class FixReport:
+    outcome: str  # passed, failed, special_cased, invalid
+    reason: str = ""  # for logs and messages; never contains expected outputs
+    counterexamples: list[dict[str, Any]] = field(default_factory=list)  # new, ranked
+    hardcoded: list[str] = field(default_factory=list)
+    inputs_checked: int = 0
+    original_failures: list[int] = field(default_factory=list)  # original cases still failing
+
+
+# Special-casing checks 
+def _canonical(value: Any) -> str:
+    """repr with tuples as lists, so [(0, 0)] and [[0, 0]] compare equal."""
+    if isinstance(value, list | tuple):
+        return "[" + ", ".join(_canonical(v) for v in value) + "]"
+    if isinstance(value, dict):
+        return "{" + ", ".join(f"{_canonical(k)}: {_canonical(v)}" for k, v in value.items()) + "}"
+    return repr(value)
+
+
+def _literals(source: str) -> set[str]:
+    """Every literal in the code: constants, and whole list/tuple/dict/set displays
+    (not the pieces of a display that is itself a literal)."""
+    found: set[str] = set()
+
+    def visit(node: ast.AST) -> None:
+        if isinstance(node, ast.Constant | ast.List | ast.Tuple | ast.Dict | ast.Set):
+            try:
+                found.add(_canonical(ast.literal_eval(node)))
+                return
+            except (ValueError, TypeError, SyntaxError):
+                pass
+        for child in ast.iter_child_nodes(node):
+            visit(child)
+
+    visit(ast.parse(source))
+    return found
+
+
+def _sub_values(value: Any) -> set[str]:
+    values = {_canonical(value)}
+    if isinstance(value, list | tuple):
+        for item in value:
+            values |= _sub_values(item)
+    elif isinstance(value, dict):
+        for k, v in value.items():
+            values |= _sub_values(k) | _sub_values(v)
+    return values
+
+
+def hardcoded_literals(original: str, fix: str, counterexamples: list[dict[str, Any]]) -> list[str]:
+    """Counterexample values that appear as literals in the fix but not the original."""
+    added = "\n".join(
+        line[2:]
+        for line in difflib.ndiff(original.splitlines(), fix.splitlines())
+        if line.startswith("+ ")
+    )
+    try:
+        new = _literals(fix) - _literals(original)
+        ast.parse(added)  # only count literals on lines the fix actually added
+        new &= _literals(added)
+    except SyntaxError:
+        new = _literals(fix) - _literals(original)
+    failing = set()
+    for ce in counterexamples:
+        for arg in counterexample_args(ce):
+            failing |= _sub_values(arg)
+    return sorted(v for v in new & failing if v not in TRIVIAL)
+
+
+def shifted(value: Any, k: int) -> Any:
+    """Every int in the value moved by k (structure, order and start <= end kept)."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int):
+        return value + k
+    if isinstance(value, list):
+        return [shifted(v, k) for v in value]
+    if isinstance(value, tuple):
+        return tuple(shifted(v, k) for v in value)
+    if isinstance(value, dict):
+        return {key: shifted(v, k) for key, v in value.items()}
+    return value
+
+
+def nearby_variants(counterexamples: list[dict[str, Any]]) -> list[tuple[Any, ...]]:
+    variants: dict[str, tuple[Any, ...]] = {}
+    for ce in counterexamples:
+        args = counterexample_args(ce)
+        for k in SHIFTS:
+            variant = shifted(args, k)
+            if variant != args:
+                variants.setdefault(repr(variant), variant)
+    return list(variants.values())
+
+
+# Verification 
+class FixVerifier:
+    def __init__(self, sandbox: Sandbox, *, max_examples: int = 500, call_timeout_s: float = 1.0):
+        self.sandbox = sandbox
+        self.max_examples = max_examples
+        self.call_timeout_s = call_timeout_s
+
+    async def verify(self, session: Session, fix: str) -> FixReport:
+        try:
+            names = {fn.name for fn in find_functions(fix)}
+        except SyntaxError as exc:
+            return FixReport("invalid", f"SyntaxError on line {exc.lineno}: {exc.msg}")
+        if session.function not in names:
+            return FixReport("invalid", f"the fix must still define {session.function}()")
+        if session.strategy_code is None:
+            return FixReport("invalid", "there are no tests to check against yet")
+
+        originals = [counterexample_args(ce) for ce in session.counterexamples]
+        examples = originals + [case.args for case in edge_cases(session.params)]
+        config = {
+            "function": session.function,
+            "predicates": {p.statement: p.predicate for p in session.properties},
+            "examples": examples,
+            "originals": originals,
+            "variants": nearby_variants(session.counterexamples),
+            "max_examples": self.max_examples,
+            "seed": random.randrange(1, 2**31),  # fresh inputs every time
+            "call_timeout_s": self.call_timeout_s,
+        }
+        harness = (
+            "from hypothesis import strategies as st\n"
+            "from sparring_partner.testing.harness import verify_fix\n\n"
+            f"{session.strategy_code}\n\n\n"
+            f"CONFIG = {config!r}\n\n\n"
+            "def run(solution, inputs):\n"
+            "    return verify_fix(solution, CONFIG, strategy)\n"
+        )
+        result = await self.sandbox.run(fix, harness)
+        if result.timed_out:
+            return FixReport("failed", "the tests timed out on your fix")
+        if result.error:
+            return FixReport("failed", f"your fix doesn't run: {result.error.type}")
+
+        report = result.value
+        base = FixReport(
+            "passed",
+            inputs_checked=report["inputs_checked"],
+            original_failures=report["original_failures"],
+        )
+        if report["counterexamples"]:
+            base.outcome, base.reason = "failed", "a property still fails"
+            base.counterexamples = report["counterexamples"]
+        elif report["variant_failures"]:
+            base.outcome = "special_cased"
+            base.reason = "it fails on inputs right next to the original failing one"
+            base.counterexamples = report["variant_failures"][:1]
+        elif hard := hardcoded_literals(session.code, fix, session.counterexamples):
+            base.outcome, base.reason, base.hardcoded = (
+                "special_cased",
+                "it hard-codes the failing input",
+                hard,
+            )
+        return base
+
+
+# The next untested risk
+class RiskDraft(BaseModel):
+    question: str = Field(description="one short question, e.g. 'What if the input isn't sorted?'")
+    example_args: str = Field(
+        description="an argument tuple that exercises it, as a Python literal"
+    )
+
+
+async def next_risk(
+    llm: JsonLLM, sandbox: Sandbox, session: Session, *, call_timeout_s: float = 1.0
+) -> tuple[str, dict[str, Any] | None]:
+    """A risk the tests may not have covered, and its counterexample if the code fails it."""
+    tested = sorted({case.label for case in edge_cases(session.params)})
+    messages: list[Message] = [
+        {"role": "system", "content": "You are a sharp code reviewer. Reply with JSON only."},
+        {
+            "role": "user",
+            "content": (
+                f"Intent: {session.intent}\n\nThe learner's fixed code:\n```python\n"
+                f"{session.code}\n```\n\nTheir spec:\n"
+                + "\n".join(f"- {p.statement}" for p in session.properties)
+                + f"\n\nEdge cases already tested: {', '.join(tested) or '(none)'}\n\n"
+                "Name ONE input risk these tests may not cover, as a short question to the "
+                "learner (e.g. 'What if the input isn't sorted?'), and an example input that "
+                "exercises it. Don't say whether the code handles it."
+            ),
+        },
+    ]
+    draft = await llm.complete_json("deep", messages, RiskDraft)
+    args = _literal_args(draft.example_args, len(session.params) or 1)
+    if args is None:
+        return draft.question, None
+    config = {
+        "function": session.function,
+        "predicates": {p.statement: p.predicate for p in session.properties},
+        "inputs": [args],
+        "call_timeout_s": call_timeout_s,
+    }
+    harness = (
+        "from sparring_partner.testing.harness import check_inputs\n\n"
+        f"CONFIG = {config!r}\n\n\n"
+        "def run(solution, inputs):\n"
+        "    return check_inputs(solution, CONFIG)\n"
+    )
+    result = await sandbox.run(session.code, harness)
+    if not result.ok:
+        return draft.question, None
+    failure = result.value["failures"].get("0")
+    return draft.question, failure

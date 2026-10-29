@@ -7,6 +7,8 @@ Everything here returns plain JSON-able dicts so results travel back intact.
 
 import ast
 import copy
+import functools
+import importlib
 import sys
 from collections.abc import Callable
 from typing import Any
@@ -20,6 +22,7 @@ from sparring_partner.testing.capture import (
     _CallTimeout,
     _check,
     _Outcome,
+    _record,
     _time_limit,
     find_counterexamples,
 )
@@ -322,3 +325,88 @@ def _normalize(value: Any) -> Any:
     if isinstance(value, dict):
         return {k: _normalize(v) for k, v in value.items()}
     return value
+
+
+def _properties(predicates: dict[str, str]) -> list[Property]:
+    properties = []
+    for statement, source in predicates.items():
+        try:
+            properties.append(Property(statement, load_predicate(source)))
+        except Exception:
+            continue
+    return properties
+
+
+def check_inputs(solution: Any, config: dict[str, Any]) -> dict[str, Any]:
+    """Which of the given inputs break a property (or crash)? Index -> counterexample."""
+    fn = getattr(solution, config["function"])
+    timeout = config.get("call_timeout_s")
+    properties = _properties(config["predicates"])
+    call = functools.partial(_call, timeout_s=timeout)
+    check = functools.partial(_check, timeout_s=timeout)
+    failures = {}
+    for index, raw_args in enumerate(config["inputs"]):
+        ce = _record(fn, _as_args(raw_args), "", properties, call, check)
+        if ce.violated_properties:
+            ce.violated_property = ce.violated_properties[0]
+            failures[index] = ce.to_dict()
+    return {"failures": failures}
+
+
+def verify_fix(
+    solution: Any, config: dict[str, Any], strategy_fn: Callable[[], Any]
+) -> dict[str, Any]:
+    """Re-run the whole bug hunt on a fix with a fresh seed, then try nearby inputs.
+
+    `config["examples"]` are the original counterexamples and edge cases;
+    `config["variants"]` are the counterexamples shifted slightly, to catch a fix
+    that only handles the exact failing input.
+    """
+    fn = getattr(solution, config["function"])
+    timeout = config.get("call_timeout_s")
+    properties = _properties(config["predicates"])
+    found = find_counterexamples(
+        fn,
+        strategy_fn(),
+        properties,
+        max_examples=config["max_examples"],
+        random_seed=config["seed"],
+        call_timeout_s=timeout,
+        examples=config["examples"],
+    )
+    variants = check_inputs(solution, {**config, "inputs": config["variants"]})["failures"]
+    originals = check_inputs(solution, {**config, "inputs": config["originals"]})["failures"]
+    return {
+        "counterexamples": [ce.to_dict() for ce in found],
+        "original_failures": sorted(originals),
+        "variant_failures": [variants[i] for i in sorted(variants)],
+        "inputs_checked": config["max_examples"] * (len(properties) + 1)
+        + len(config["examples"])
+        + len(config["variants"]),
+    }
+
+
+def resolve_apis(solution: Any, config: dict[str, Any]) -> dict[str, Any]:
+    """Which `module.attr.chain` references don't exist in this environment?
+
+    `solution` is unused: only the names in config are imported and looked up.
+    """
+    missing = []
+    for ref in config["references"]:
+        module_name, attrs = ref["module"], ref["attrs"]
+        try:
+            obj = importlib.import_module(module_name)
+        except Exception as exc:
+            missing.append({**ref, "error": f"{type(exc).__name__}: {exc}"})
+            continue
+        for depth, attr in enumerate(attrs):
+            path = ".".join([module_name, *attrs[: depth + 1]])
+            if hasattr(obj, attr):
+                obj = getattr(obj, attr)
+                continue
+            try:  # a submodule that isn't imported yet, e.g. xml.etree
+                obj = importlib.import_module(path)
+            except Exception:
+                missing.append({**ref, "error": f"{path} does not exist"})
+                break
+    return {"missing": missing}

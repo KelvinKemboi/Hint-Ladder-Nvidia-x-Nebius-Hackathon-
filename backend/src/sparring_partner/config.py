@@ -35,6 +35,8 @@ class Settings(BaseSettings):
     # Bug hunt: Hypothesis inputs per property, and the time limit for one call of the user's code.
     explore_max_examples: int = 200
     explore_call_timeout_s: float = 1.0
+    # Fix verification: fresh inputs per property, with a new seed each time.
+    verify_examples: int = 500
 
     # Demo only: GET /api/sessions/{id}/gate-log shows blocked hints (and so the answers).
     expose_gate_log: bool = False

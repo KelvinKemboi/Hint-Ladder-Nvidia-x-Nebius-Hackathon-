@@ -17,13 +17,20 @@ from sparring_partner.agents.testgen import (
 )
 from sparring_partner.llm import Message, StructuredOutputError
 from sparring_partner.sandbox import Sandbox
-from sparring_partner.session import PropertySpec, Session
+from sparring_partner.session import Mode, PropertySpec, Session
 
 logger = logging.getLogger(__name__)
 
 SYSTEM = (
     "You are a careful test engineer writing executable specifications for Python functions. "
     "Reply with JSON only."
+)
+
+# AI Code Review mode: steer the spec towards what AI-written code typically gets wrong.
+REVIEW_FOCUS = (
+    "\nThis code was written by an AI assistant. Make sure the properties would catch its "
+    "usual mistakes: assuming the input is sorted, non-empty or unique; boundary and "
+    "off-by-one slips; and errors silently swallowed instead of reported."
 )
 
 PREDICATE_RULES = """\
@@ -76,7 +83,8 @@ class PropertyProposer:
             "- at least one property tying the output back to the input, so a function that "
             "loses or invents data fails it (for sorting, e.g. 'the output is a rearrangement "
             "of the input'). Shape checks alone miss most bugs.\n"
-            "Each statement is one plain-English sentence a student can check by hand.",
+            "Each statement is one plain-English sentence a student can check by hand."
+            + (REVIEW_FOCUS if session.mode is Mode.REVIEW else ""),
         )
         proposal = await self.llm.complete_json("fast", messages, Proposal)
         return [

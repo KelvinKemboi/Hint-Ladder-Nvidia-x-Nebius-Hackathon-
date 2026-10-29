@@ -28,10 +28,11 @@ def make_client():
         app.dependency_overrides[get_orchestrator] = lambda: orchestrator
         client = TestClient(app)
         client.__enter__()
-        clients.append(client)
+        clients.append((client, orchestrator))
         return client, orchestrator
 
     yield make
-    for client in clients:
+    for client, orchestrator in clients:
+        client.portal.call(orchestrator.wait_idle)  # let background work finish first
         client.__exit__(None, None, None)
     app.dependency_overrides.clear()
