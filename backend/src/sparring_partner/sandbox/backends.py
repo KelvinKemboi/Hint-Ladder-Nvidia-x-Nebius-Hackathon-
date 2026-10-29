@@ -33,12 +33,14 @@ class RawRun:
     timed_out: bool
     elapsed_s: float
 
+
 class Backend(Protocol):
     name: str
 
     async def execute(self, files: dict[str, bytes], timeout_s: float) -> RawRun:
         """Write `files` (relative path -> content) to a fresh workdir and run the runner."""
         ...
+
 
 class LocalBackend:
     """Runs in a subprocess on this machine. NOT isolated: development only."""
@@ -64,7 +66,7 @@ class LocalBackend:
                 env={"PATH": os.environ.get("PATH", ""), "PYTHONHASHSEED": "0"},
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
-                start_new_session=True, # own process group, so a timeout kills any children too
+                start_new_session=True,  # own process group, so a timeout kills any children too
             )
             timed_out = False
             try:
@@ -134,6 +136,7 @@ class ContreeBackend:
             timed_out=_process_timed_out(result),
             elapsed_s=result.elapsed.total_seconds(),
         )
+
 
 def _process_timed_out(result: Any) -> bool:
     # The SDK exposes this only on the raw operation metadata.

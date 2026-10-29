@@ -51,22 +51,31 @@ def find_counterexamples(
     max_examples: int = 200,
     random_seed: int | None = None,
     call_timeout_s: float | None = None,
+    examples: Sequence[Any] = (),
 ) -> list[Counterexample]:
     """Return one minimal counterexample per distinct failure, best first.
 
     `args_strategy` draws a tuple of positional arguments (a non-tuple value is
     treated as the only argument). With `call_timeout_s`, a call that runs longer
     (e.g. an infinite loop) counts as raising TimeoutError at the line it was stuck on.
+    `examples` are hand-picked argument tuples (edge cases) checked as well; a
+    failing one competes with the shrunk counterexamples in deduplication.
     """
     call = functools.partial(_call, timeout_s=call_timeout_s)
+    check = functools.partial(_check, timeout_s=call_timeout_s)
     found = []
     for prop in [None, *properties]:
-        args = _shrink(fn, args_strategy, prop, max_examples, random_seed, call)
+        args = _shrink(fn, args_strategy, prop, max_examples, random_seed, call, check)
         if args is None:
             continue
-        ce = _record(fn, args, prop.name if prop else NO_CRASH, properties, call)
+        ce = _record(fn, args, prop.name if prop else NO_CRASH, properties, call, check)
         # Re-running must reproduce the failure; drop flaky ones.
         if ce.violated_property in ce.violated_properties:
+            found.append(ce)
+    for example in examples:
+        ce = _record(fn, _as_args(example), "", properties, call, check)
+        if ce.violated_properties:
+            ce.violated_property = ce.violated_properties[0]
             found.append(ce)
     return dedupe(found, [NO_CRASH, *(p.name for p in properties)])
 
@@ -78,6 +87,7 @@ def _shrink(
     max_examples: int,
     random_seed: int | None,
     call: Callable[..., _Outcome],
+    check: Callable[..., str | None],
 ) -> tuple[Any, ...] | None:
     """Search for inputs breaking `prop` (None = NO_CRASH); return the shrunk one."""
     failures: list[tuple[Any, ...]] = []
@@ -100,7 +110,7 @@ def _shrink(
         elif outcome.exception is not None:
             return
         else:
-            failed = _check(prop, args, outcome.output) is not None
+            failed = check(prop, args, outcome.output) is not None
         if failed:
             failures.append(args)
             raise _PropertyFailed
@@ -120,6 +130,7 @@ def _record(
     found_by: str,
     properties: Sequence[Property],
     call: Callable[..., _Outcome],
+    check: Callable[..., str | None],
 ) -> Counterexample:
     """Run `fn` on `args` again and record everything that goes wrong."""
     name = getattr(fn, "__name__", repr(fn))
@@ -144,7 +155,7 @@ def _record(
 
     ce.output = short_repr(outcome.output)
     for prop in properties:
-        error = _check(prop, args, outcome.output)
+        error = check(prop, args, outcome.output)
         if error is not None:
             ce.violated_properties.append(prop.name)
             if error:
@@ -193,10 +204,20 @@ def _time_limit(seconds: float | None) -> Generator[None]:
         signal.signal(signal.SIGALRM, previous)
 
 
-def _check(prop: Property, args: tuple[Any, ...], output: Any) -> str | None:
-    """None if the property holds, "" if it is false, or the predicate's own error."""
+def _check(
+    prop: Property, args: tuple[Any, ...], output: Any, timeout_s: float | None = None
+) -> str | None:
+    """None if the property holds, "" if it is false, or the predicate's own error.
+
+    A predicate that runs out of time or memory (e.g. it builds a huge range) can't
+    tell us anything, so it counts as holding rather than blaming the user's code.
+    """
+    args = copy.deepcopy(args)
     try:
-        return None if prop.check(copy.deepcopy(args), output) else ""
+        with _time_limit(timeout_s):
+            return None if prop.check(args, output) else ""
+    except (_CallTimeout, MemoryError):
+        return None
     except Exception as exc:
         return f"{type(exc).__name__}: {exc}"
 

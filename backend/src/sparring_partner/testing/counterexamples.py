@@ -30,7 +30,7 @@ class Counterexample:
     args: list[str] # repr of each positional argument
     call: str # e.g. "merge([[1, 4], [4, 5]])"
     violated_property: str # the property whose search found this input
-    violated_properties: list[str] = field(default_factory=list) # every property it breaks
+    violated_properties: list[str] = field(default_factory=list)  # every property it breaks
     output: str | None = None # repr of the return value; None if it raised
     exception_type: str | None = None
     exception_message: str | None = None

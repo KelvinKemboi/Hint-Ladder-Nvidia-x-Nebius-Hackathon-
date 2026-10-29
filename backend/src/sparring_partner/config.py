@@ -32,6 +32,10 @@ class Settings(BaseSettings):
     sandbox_timeout_s: float = 60.0
     sandbox_memory_mb: int = 512
 
+    # Bug hunt: Hypothesis inputs per property, and the time limit for one call of the user's code.
+    explore_max_examples: int = 200
+    explore_call_timeout_s: float = 1.0
+
     cors_origins: list[str] = ["http://localhost:5173"]
 
 

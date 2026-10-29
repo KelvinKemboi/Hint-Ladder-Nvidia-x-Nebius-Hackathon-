@@ -2,6 +2,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from sparring_partner import __version__
+from sparring_partner.api.sessions import router as sessions_router
 from sparring_partner.config import get_settings
 
 app = FastAPI(title="Sparring Partner", version=__version__)
@@ -12,6 +13,7 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+app.include_router(sessions_router)
 
 
 @app.get("/api/health")

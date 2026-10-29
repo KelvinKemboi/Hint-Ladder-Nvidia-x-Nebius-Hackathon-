@@ -54,7 +54,7 @@ def limit_memory(mb):
     if not mb:
         return
     limit = mb * 1024 * 1024
-    with contextlib.suppress(ValueError, OSError): # not enforceable on every OS (e.g. macOS)
+    with contextlib.suppress(ValueError, OSError):  # not enforceable on every OS (e.g. macOS)
         resource.setrlimit(resource.RLIMIT_AS, (limit, limit))
 
 

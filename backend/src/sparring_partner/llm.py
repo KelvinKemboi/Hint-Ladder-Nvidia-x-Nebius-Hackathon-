@@ -119,7 +119,15 @@ class LLM:
         )
         return completion
 
-    async def complete_json(self, role: Role,messages: list[Message], schema: type[SchemaT], *, retries: int = 2, **kwargs: Any,) -> SchemaT:
+    async def complete_json(
+        self,
+        role: Role,
+        messages: list[Message],
+        schema: type[SchemaT],
+        *,
+        retries: int = 2,
+        **kwargs: Any,
+    ) -> SchemaT:
         """Completion parsed into `schema`; on invalid output, show the error and retry."""
         instruction = (
             "Reply with only a JSON object that matches this JSON Schema, with no other text:\n"

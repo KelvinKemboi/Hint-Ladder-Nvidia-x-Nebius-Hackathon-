@@ -1,0 +1,184 @@
+"""Sandbox-side entry points for generated harnesses. Hypothesis + standard library only.
+
+A generated harness is a few lines: a CONFIG literal, the model-written
+`strategy()` function, and a `run(solution, inputs)` that calls one of these.
+Everything here returns plain JSON-able dicts so results travel back intact.
+"""
+
+import ast
+import copy
+from collections.abc import Callable
+from typing import Any
+
+from hypothesis import HealthCheck, given, settings
+from hypothesis.strategies import SearchStrategy
+
+from sparring_partner.testing.capture import (
+    _as_args,
+    _call,
+    _CallTimeout,
+    _time_limit,
+    find_counterexamples,
+)
+from sparring_partner.testing.counterexamples import Property
+
+
+def load_predicate(source: str) -> Callable[[tuple[Any, ...], Any], Any]:
+    """Compile a property's predicate source, which must define `check(args, output)`."""
+    namespace: dict[str, Any] = {}
+    exec(compile(source, "<property>", "exec"), namespace)
+    check = namespace.get("check")
+    if not callable(check):
+        raise ValueError("predicate must define check(args, output)")
+    return check
+
+
+def check_predicates(solution: Any, config: dict[str, Any]) -> dict[str, Any]:
+    """Run every predicate on the user's output for a few trivial inputs.
+
+    A predicate is broken if it fails to load, raises, or returns a non-bool.
+    Returning False there is fine: the user's code may well be wrong. It is also
+    broken if it rejects a worked example's known-correct output.
+    """
+    fn = getattr(solution, config["function"])
+    errors: dict[str, str] = {}
+    for name, source in config["predicates"].items():
+        try:
+            check = load_predicate(source)
+        except Exception as exc:
+            errors[name] = f"{type(exc).__name__}: {exc}"
+            continue
+        for raw_args in config["inputs"]:
+            args = _as_args(raw_args)
+            outcome = _call(fn, args, config.get("call_timeout_s"))
+            if outcome.exception is not None:
+                continue  # can't judge the predicate where the code itself crashes
+            try:
+                with _time_limit(config.get("call_timeout_s")):
+                    value = check(copy.deepcopy(args), outcome.output)
+            except _CallTimeout:
+                errors[name] = f"timed out on a trivial input (args={args!r})"
+                break
+            except Exception as exc:
+                errors[name] = f"{type(exc).__name__}: {exc} (args={args!r})"
+                break
+            if not isinstance(value, bool):
+                errors[name] = f"returned {type(value).__name__}, expected bool (args={args!r})"
+                break
+        if name not in errors and (rejected := _rejects_correct_output(check, config)):
+            errors[name] = rejected
+    return {"errors": errors}
+
+
+def _rejects_correct_output(check: Callable[..., Any], config: dict[str, Any]) -> str | None:
+    """Why `check` fails a worked example (args with a known-correct output), if it does."""
+    for raw_args, expected in config.get("examples", []):
+        args = _as_args(raw_args)
+        try:
+            with _time_limit(config.get("call_timeout_s")):
+                value = check(copy.deepcopy(args), copy.deepcopy(expected))
+        except _CallTimeout:
+            continue
+        except Exception as exc:
+            return f"{type(exc).__name__}: {exc} (args={args!r}, output={expected!r})"
+        if value is not True:
+            return f"says the correct output {expected!r} for args {args!r} breaks the property"
+    return None
+
+
+def _is_int(value: Any) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def _is_interval(value: Any) -> bool:
+    return (
+        isinstance(value, list | tuple)
+        and len(value) == 2
+        and all(_is_int(v) for v in value)
+        and value[0] <= value[1]
+    )
+
+
+# What a drawn argument of each input kind must look like (see agents.testgen.Kind).
+KIND_CHECKS: dict[str, Callable[[Any], bool]] = {
+    "int": _is_int,
+    "float": lambda x: isinstance(x, int | float) and not isinstance(x, bool),
+    "str": lambda x: isinstance(x, str),
+    "bool": lambda x: isinstance(x, bool),
+    "list_int": lambda x: isinstance(x, list) and all(_is_int(v) for v in x),
+    "sorted_list_int": lambda x: (
+        isinstance(x, list) and all(_is_int(v) for v in x) and x == sorted(x)
+    ),
+    "list_str": lambda x: isinstance(x, list) and all(isinstance(v, str) for v in x),
+    "intervals": lambda x: isinstance(x, list) and all(_is_interval(v) for v in x),
+    "dict_str_int": lambda x: (
+        isinstance(x, dict) and all(isinstance(k, str) and _is_int(v) for k, v in x.items())
+    ),
+}
+
+
+def check_strategy(
+    strategy_fn: Callable[[], Any], arity: int, n: int = 20, kinds: list[str] | None = None
+) -> list[str]:
+    """Problems with a generated strategy, or [] if it draws valid argument tuples."""
+    try:
+        strategy = strategy_fn()
+    except Exception as exc:
+        return [f"strategy() raised {type(exc).__name__}: {exc}"]
+    if not isinstance(strategy, SearchStrategy):
+        return [f"strategy() must return a Hypothesis strategy, got {type(strategy).__name__}"]
+
+    draws: list[Any] = []
+
+    @settings(max_examples=n, database=None, deadline=None, suppress_health_check=list(HealthCheck))
+    @given(strategy)
+    def collect(value: Any) -> None:
+        draws.append(value)
+
+    try:
+        collect()
+    except Exception as exc:
+        return [f"drawing examples failed: {type(exc).__name__}: {exc}"]
+    if not draws:
+        return ["the strategy drew no examples"]
+    for value in draws:
+        if not isinstance(value, tuple) or len(value) != arity:
+            return [f"must draw a tuple of {arity} argument(s), got {value!r:.200}"]
+        try:
+            ast.literal_eval(repr(value))
+        except (ValueError, SyntaxError):
+            return [f"must draw plain Python literals (lists, ints, str...), got {value!r:.200}"]
+        for i, (arg, kind) in enumerate(zip(value, kinds or [], strict=False)):
+            check = KIND_CHECKS.get(kind)
+            if check is not None and not check(arg):
+                return [f"argument {i + 1} must be {kind}, got {arg!r:.200}"]
+    return []
+
+
+def explore(
+    solution: Any, config: dict[str, Any], strategy_fn: Callable[[], Any]
+) -> dict[str, Any]:
+    """Hunt for bugs: Hypothesis per property plus the hand-picked edge cases."""
+    fn = getattr(solution, config["function"])
+    properties, property_errors = [], {}
+    for name, source in config["predicates"].items():
+        try:
+            properties.append(Property(name, load_predicate(source)))
+        except Exception as exc:
+            property_errors[name] = f"{type(exc).__name__}: {exc}"
+
+    found = find_counterexamples(
+        fn,
+        strategy_fn(),
+        properties,
+        max_examples=config["max_examples"],
+        random_seed=config.get("seed"),
+        call_timeout_s=config.get("call_timeout_s"),
+        examples=config["edge_cases"],
+    )
+    return {
+        "counterexamples": [ce.to_dict() for ce in found],
+        "property_errors": property_errors,
+        "edge_cases": len(config["edge_cases"]),
+        "max_examples": config["max_examples"],
+    }

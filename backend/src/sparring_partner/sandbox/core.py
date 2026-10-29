@@ -16,7 +16,7 @@ from sparring_partner.sandbox.backends import (
 )
 from sparring_partner.sandbox.models import ErrorInfo, RunResult
 
-MARKER = "@@SPARRING_RESULT@@" # must match _runner.MARKER
+MARKER = "@@SPARRING_RESULT@@"  # must match _runner.MARKER
 IMPORT_TIMEOUT_S = 10.0
 
 PACKAGE_DIR = Path(sparring_partner.__file__).parent
@@ -26,6 +26,7 @@ SUPPORT_FILES = [
     "testing/__init__.py",
     "testing/capture.py",
     "testing/counterexamples.py",
+    "testing/harness.py",
 ]
 IMPORT_ONLY_HARNESS = "def run(solution, inputs):\n    return None\n"
 
@@ -130,7 +131,9 @@ def _parse(raw: RawRun, backend: str) -> RunResult:
     data = json.loads(payload.strip())
     return RunResult.model_validate(result.model_dump() | {k: data[k] for k in _PAYLOAD_FIELDS})
 
+
 _PAYLOAD_FIELDS = ("stdout", "stderr", "error", "value", "outcomes")
+
 
 @lru_cache
 def get_sandbox() -> Sandbox:

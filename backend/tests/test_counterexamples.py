@@ -12,13 +12,14 @@ from sparring_partner.testing import (
     rank,
 )
 
+
 # Demo bug: AI-generated merge_intervals
 def merge_intervals(intervals):
     if not intervals:
         return []
     merged = [list(intervals[0])]
     for start, end in intervals[1:]:
-        if start < merged[-1][1]: # bug: touching intervals should merge(<=)
+        if start < merged[-1][1]:  # bug: touching intervals should merge(<=)
             merged[-1][1] = max(merged[-1][1], end)
         else:
             merged.append([start, end])
@@ -34,8 +35,10 @@ def merge_intervals_fixed(intervals):
             merged.append([start, end])
     return merged
 
+
 def points(intervals):
     return {x for start, end in intervals for x in range(start, end + 1)}
+
 
 NO_OVERLAP = Property(
     "output intervals never overlap",
@@ -65,6 +68,7 @@ def test_finds_touching_interval_bug_with_minimal_input():
     assert ce.call == f"merge_intervals({ce.args[0]})"
     assert not ce.raised
 
+
 def test_unsorted_input_finds_a_second_distinct_failure():
     touching, unsorted = find_counterexamples(merge_intervals, any_intervals, MERGE_PROPERTIES)
 
@@ -72,6 +76,7 @@ def test_unsorted_input_finds_a_second_distinct_failure():
     assert unsorted.violated_properties == [COVERED.name]
     intervals = ast.literal_eval(unsorted.args[0])
     assert intervals != sorted(intervals)
+
 
 def test_correct_code_has_no_counterexamples():
     assert find_counterexamples(merge_intervals_fixed, any_intervals, MERGE_PROPERTIES) == []
@@ -83,7 +88,7 @@ def test_same_seed_gives_same_counterexample():
     assert [ce.call for ce in first] == [ce.call for ce in second]
 
 
-# Exceptions, predicate errors, mutation 
+# Exceptions, predicate errors, mutation
 def average(xs):
     return sum(xs) / len(xs)
 
@@ -196,3 +201,21 @@ def test_call_timeout_turns_infinite_loop_into_counterexample():
     assert ce.exception_type == "TimeoutError"
     loop = countdown.__code__.co_firstlineno + 1
     assert ce.exception_line in (loop, loop + 1)
+
+
+def test_predicate_that_runs_out_of_time_or_memory_is_not_blamed_on_the_code():
+    def identity(n):
+        return n
+
+    def slow_check(args, output):
+        while True:  # a Python-level loop, so the time limit can interrupt it
+            pass
+
+    def hungry_check(args, output):
+        raise MemoryError
+
+    properties = [Property("slow", slow_check), Property("hungry", hungry_check)]
+    found = find_counterexamples(
+        identity, st.integers(0, 3), properties, max_examples=5, call_timeout_s=0.1
+    )
+    assert found == []
