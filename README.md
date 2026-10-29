@@ -32,6 +32,18 @@ npm install
 npm run dev
 ```
 
+**Sandbox**: user code only ever runs in the Token Factory sandbox (beta; [request access](https://tokenfactory.nebius.com/sandboxes/about)).
+Set `NEBIUS_PROJECT_ID`, then build the image once (Python 3.12 + Hypothesis) and smoke-test it:
+
+```bash
+cd backend
+uv run python scripts/build_sandbox_image.py
+uv run python scripts/build_sandbox_image.py --check
+```
+
+For local development without sandbox access, set `SANDBOX_BACKEND=local`. That runs code in an
+unisolated subprocess on your machine (and macOS ignores the memory limit), so only use it with code you trust.
+
 **Checks** (the same ones CI runs):
 
 ```bash

@@ -1,5 +1,6 @@
 from functools import lru_cache
 from pathlib import Path
+from typing import Literal
 
 from pydantic import SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -15,11 +16,21 @@ class Settings(BaseSettings):
 
     nebius_api_key: SecretStr = SecretStr("")
     nebius_base_url: str = "https://api.tokenfactory.nebius.com/v1/"
+    nebius_project_id: str = ""  # needed by the Token Factory sandbox only
 
-    # Model IDs per role (see docs/PROJECT_OUTLINE.md §5.2).
+    # Model IDs per role
     model_fast: str = ""
     model_deep: str = ""
     model_gate: str = ""
+
+    llm_timeout_s: float = 120.0
+    llm_max_retries: int = 2
+
+    # "contree" = Token Factory sandbox; "local" = subprocess on this machine, dev only.
+    sandbox_backend: Literal["contree", "local"] = "contree"
+    sandbox_image: str = "sparring-partner-python:v1"  # built by scripts/build_sandbox_image.py
+    sandbox_timeout_s: float = 60.0
+    sandbox_memory_mb: int = 512
 
     cors_origins: list[str] = ["http://localhost:5173"]
 
