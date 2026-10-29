@@ -32,6 +32,12 @@ npm install
 npm run dev
 ```
 
+The UI has the code editor on the left and the coaching chat on the right. Pick a mode (Debug or
+AI Code Review), say what the code should do, and press Start. Then confirm the properties, predict
+what the failing call should return, climb the hint meter if you need to, and submit your fix from
+the editor. For demos, set `EXPOSE_GATE_LOG=true` to show the **Gate log** drawer: every message
+the gate blocked, and why.
+
 **Sandbox**: user code only ever runs in the Token Factory sandbox (beta; [request access](https://tokenfactory.nebius.com/sandboxes/about)).
 Set `NEBIUS_PROJECT_ID`, then build the image once (Python 3.12 + Hypothesis) and smoke-test it:
 

@@ -86,6 +86,16 @@ async def test_correct_fix_passes_on_hundreds_of_fresh_inputs(sandbox):
     assert report.original_failures == []
 
 
+async def test_progress_is_reported_as_each_batch_finishes(sandbox):
+    seen = []
+    verifier = FixVerifier(sandbox, max_examples=100, batches=4)
+
+    report = await verifier.verify(explored(), FIXED_MERGE, on_progress=lambda *p: seen.append(p))
+
+    assert report.outcome == "passed"
+    assert seen == [(25, 100), (50, 100), (75, 100), (100, 100)]
+
+
 async def test_partial_fix_fails_with_a_new_counterexample(sandbox):
     report = await FixVerifier(sandbox, max_examples=100).verify(explored(), HALF_FIXED_MERGE)
 

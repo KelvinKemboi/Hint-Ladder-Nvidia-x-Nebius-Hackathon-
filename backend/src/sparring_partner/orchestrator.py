@@ -6,6 +6,7 @@ import time
 from collections.abc import Coroutine
 from typing import Any
 
+from sparring_partner.agents import tracer
 from sparring_partner.agents.code_info import FunctionInfo, pick_function
 from sparring_partner.agents.diagnosis import Diagnoser, counterexample_args
 from sparring_partner.agents.errors import GenerationError, NotAvailable, UserCodeError
@@ -69,7 +70,10 @@ class Orchestrator:
         self.hints = HintWriter(llm, self.gate, self.diagnoser)
         timeout = self.settings.explore_call_timeout_s
         self.verifier = FixVerifier(
-            sandbox, max_examples=self.settings.verify_examples, call_timeout_s=timeout
+            sandbox,
+            max_examples=self.settings.verify_examples,
+            call_timeout_s=timeout,
+            batches=self.settings.verify_batches,
         )
         self.reviewer = Reviewer(llm, sandbox, call_timeout_s=timeout)
         self._tasks: set[asyncio.Task[Any]] = set()
@@ -275,13 +279,23 @@ class Orchestrator:
             ]
 
         session.hint_level = max(session.hint_level, 1)  # the symptom is now on the table
-        message = await self._say(session, texts, kind="reveal" if correct else "nudge")
+        compared = {
+            "outcome": outcome,
+            "call": ce["call"],
+            "predicted": _shown_prediction(prediction),
+            "returned": _shown_outcome(actual),
+        }
+        message = await self._say(
+            session, texts, kind="reveal" if correct else "nudge", data=compared
+        )
         if outcome == "revealed" and session.state is S.PREDICTING:
             self._move(session, S.HINTING)
         return {
             "outcome": outcome,
             "message": message,
             "actual": describe_actual(actual),
+            "predicted": compared["predicted"],
+            "returned": compared["returned"],
             "state": session.state.value,
             "hint_level": session.hint_level,
         }
@@ -322,8 +336,9 @@ class Orchestrator:
             self._move(session, S.HINTING)
         level = session.climb_hint()
         text = await self.hints.write(session, level)
-        self._record(session, "coach", "hint", text, level=level)
-        return {"level": level, "text": text}
+        data = _trace_data(text, session.evidence) if level == 3 else None
+        self._record(session, "coach", "hint", text, level=level, data=data)
+        return {"level": level, "text": text, **(data or {})}
 
     # Fix verification and the post-mortem
     async def submit_fix(self, session_id: str, code: str) -> dict[str, Any]:
@@ -337,7 +352,17 @@ class Orchestrator:
             session,
             f"Checking your fix on {self.settings.verify_examples} fresh inputs per property",
         )
-        report = await self.verifier.verify(session, code)
+        report = await self.verifier.verify(
+            session,
+            code,
+            on_progress=lambda checked, total: self._progress(
+                session,
+                f"Verified on {checked}/{total} fresh inputs",
+                phase="verify",
+                checked=checked,
+                total=total,
+            ),
+        )
         session.fix_attempts.append(
             {
                 "code": code,
@@ -363,7 +388,7 @@ class Orchestrator:
             texts = [f"That fix can't be checked: {report.reason}.", "That fix can't be checked."]
         else:
             texts = [f"Not yet: {report.reason}."]
-        message = await self._say(session, texts, kind="fix_result")
+        message = await self._say(session, texts, kind="fix_result", data=_fix_data(report))
         return _fix_out(session, report, message)
 
     async def _fix_passed(self, session: Session, code: str, report: FixReport) -> dict[str, Any]:
@@ -377,6 +402,7 @@ class Orchestrator:
                 f"{report.inputs_checked} generated ones."
             ],
             kind="fix_result",
+            data=_fix_data(report),
         )
         await self._write_postmortem(session)
         return _fix_out(session, report, message, next_question=await self._next_risk(session))
@@ -396,7 +422,10 @@ class Orchestrator:
         else:
             lead = "Not yet: your spec still breaks."
         message = await self._say(
-            session, [f"{lead} What should `{call}` return?"], kind="question"
+            session,
+            [f"{lead} What should `{call}` return?"],
+            kind="question",
+            data=_fix_data(report),
         )
         self._start(self._diagnose(session))
         return _fix_out(session, report, message)
@@ -462,7 +491,9 @@ class Orchestrator:
             self._record(session, "coach", kind, text)
         return decision.allowed
 
-    async def _say(self, session: Session, texts: list[str], *, kind: str) -> str:
+    async def _say(
+        self, session: Session, texts: list[str], *, kind: str, data: dict[str, Any] | None = None
+    ) -> str:
         """Send the first of `texts` the gate allows (fixed templates: no model layer)."""
         for text in texts:
             decision = await self.gate.check(
@@ -470,12 +501,20 @@ class Orchestrator:
             )
             if decision.allowed:
                 break
-        self._record(session, "coach", kind, text)
+        self._record(session, "coach", kind, text, data=data)
         return text
 
     def _record(
-        self, session: Session, role: str, kind: str, text: str, *, level: int | None = None
+        self,
+        session: Session,
+        role: str,
+        kind: str,
+        text: str,
+        *,
+        level: int | None = None,
+        data: dict[str, Any] | None = None,
     ) -> None:
+        """`data` is structured detail for the UI; it must show nothing `text` doesn't."""
         level = session.hint_level if level is None else level
         session.messages.append(
             {
@@ -483,6 +522,7 @@ class Orchestrator:
                 "kind": kind,
                 "level": level,
                 "text": text,
+                "data": data,
                 "case": session.current_case,
                 "at": time.time(),
             }
@@ -530,6 +570,41 @@ def _spec_reminder(session: Session, result: dict[str, Any], prediction: Predict
         f'Re-read the intent: "{session.intent}". '
         f"What should a correct {session.function}() return?"
     )
+
+
+def _shown_prediction(prediction: Prediction) -> dict[str, Any]:
+    if prediction.kind == "error":
+        return {"kind": "error", "text": prediction.error_name or "an error"}
+    return {"kind": "value", "text": repr(prediction.value)}
+
+
+def _shown_outcome(actual: dict[str, Any]) -> dict[str, Any]:
+    if actual["error"]:
+        return {"kind": "error", "text": actual["error"]}
+    return {"kind": "value", "text": actual["output"]}
+
+
+def _trace_data(text: str, evidence: dict[str, Any] | None) -> dict[str, Any] | None:
+    """The level 3 table as rows (without line numbers), and the hint's prose without it."""
+    table = tracer.render(evidence, show_lines=False) if evidence else None
+    if not table or table not in text:
+        return None
+    return {
+        "prose": text.replace(table, "").strip(),
+        "table": {
+            "rows": [
+                {"step": r["step"], "vars": r["vars"], "marked": r["marked"]}
+                for r in evidence["rows"]
+            ],
+            "output": evidence["output"],
+            "exception": evidence["exception"],
+            "truncated_before": evidence["truncated_before"],
+        },
+    }
+
+
+def _fix_data(report: FixReport) -> dict[str, Any]:
+    return {"outcome": report.outcome, "inputs_checked": report.inputs_checked}
 
 
 def _fix_out(

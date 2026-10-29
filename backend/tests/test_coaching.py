@@ -60,6 +60,23 @@ def test_correct_prediction_reveals_the_bug(make_client, answer):
     assert result["state"] == "hinting" and result["hint_level"] == 1
 
 
+def test_the_reveal_carries_both_values_for_side_by_side_display(make_client):
+    client, _, sid, _ = predicting(make_client)
+
+    result = client.post(f"/api/sessions/{sid}/prediction", json={"answer": "[(0, 0)]"}).json()
+
+    assert result["predicted"] == {"kind": "value", "text": "[(0, 0)]"}
+    assert result["returned"] == {"kind": "value", "text": "[[0, 0], [0, 0]]"}
+    [reveal] = [m for m in client.get(f"/api/sessions/{sid}").json()["messages"] if m["data"]]
+    assert reveal["kind"] == "reveal"
+    assert reveal["data"] == {
+        "outcome": "revealed",
+        "call": TOUCHING_CALL,
+        "predicted": result["predicted"],
+        "returned": result["returned"],
+    }
+
+
 def test_predicting_what_the_buggy_code_does_gets_a_nudge_to_the_spec(make_client):
     client, _, sid, _ = predicting(make_client)
 
@@ -121,6 +138,22 @@ def test_climbing_all_five_levels(make_client):
     # The deep model wrote the hints, the gate model judged them.
     roles = {name: role for role, name, _ in llm.calls if name in ("HintDraft", "GateVerdict")}
     assert roles == {"HintDraft": "deep", "GateVerdict": "gate"}
+
+
+def test_level_3_hint_carries_the_trace_table_without_line_numbers(make_client):
+    drafts = [{"text": GOOD_HINTS[n]} for n in range(1, 4)]
+    client, _, sid, _ = predicting(make_client, HintDraft=drafts, GateVerdict=[ALLOW] * 3)
+
+    hints = [hint(client, sid).json() for _ in range(3)]
+
+    assert hints[0]["table"] is None and hints[1]["table"] is None
+    assert hints[2]["prose"] == GOOD_HINTS[3]
+    table = hints[2]["table"]
+    assert sum(row["marked"] for row in table["rows"]) == 1
+    assert all(set(row) == {"step", "vars", "marked"} for row in table["rows"])
+    assert table["output"] == "[[0, 0], [0, 0]]"
+    stored = client.get(f"/api/sessions/{sid}").json()["messages"][-1]
+    assert stored["data"] == {"prose": hints[2]["prose"], "table": table}
 
 
 def test_level_prompts_carry_the_do_not_reveal_rules(make_client):

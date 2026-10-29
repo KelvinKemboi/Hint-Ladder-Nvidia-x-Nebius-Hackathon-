@@ -5,11 +5,17 @@ inputs per property, plus the edge cases and every original counterexample),
 and it doesn't special-case the failing input: no counterexample values newly
 hard-coded in the diff, and no failures on inputs right next to the
 counterexamples (every integer shifted a little).
+
+The N inputs are split into batches that run in parallel, each with its own
+seed, so progress ("verified on 300/500") can be reported as they finish.
 """
 
 import ast
+import asyncio
 import difflib
+import math
 import random
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -21,9 +27,12 @@ from sparring_partner.agents.testgen import JsonLLM, _literal_args, args_fit, ed
 from sparring_partner.llm import Message
 from sparring_partner.sandbox import Sandbox
 from sparring_partner.session import Session
+from sparring_partner.testing.counterexamples import Counterexample, dedupe
 
 SHIFTS = (1, 2, 3, 7, -1, -4)
 TRIVIAL = {"0", "1", "-1", "2", "True", "False", "None", "''", "[]", "()", "{}", "0.0"}
+
+Progress = Callable[[int, int], None]  # (fresh inputs checked per property, of N)
 
 
 @dataclass
@@ -124,12 +133,22 @@ def nearby_variants(counterexamples: list[dict[str, Any]]) -> list[tuple[Any, ..
 
 # Verification
 class FixVerifier:
-    def __init__(self, sandbox: Sandbox, *, max_examples: int = 500, call_timeout_s: float = 1.0):
+    def __init__(
+        self,
+        sandbox: Sandbox,
+        *,
+        max_examples: int = 500,
+        call_timeout_s: float = 1.0,
+        batches: int = 5,
+    ):
         self.sandbox = sandbox
         self.max_examples = max_examples
         self.call_timeout_s = call_timeout_s
+        self.batches = max(1, min(batches, max_examples))
 
-    async def verify(self, session: Session, fix: str) -> FixReport:
+    async def verify(
+        self, session: Session, fix: str, on_progress: Progress | None = None
+    ) -> FixReport:
         try:
             names = {fn.name for fn in find_functions(fix)}
         except SyntaxError as exc:
@@ -139,18 +158,70 @@ class FixVerifier:
         if session.strategy_code is None:
             return FixReport("invalid", "there are no tests to check against yet")
 
+        # The first batch also runs the hand-picked inputs; the rest only fresh ones.
         originals = [counterexample_args(ce) for ce in session.counterexamples]
-        examples = originals + [case.args for case in edge_cases(session.params)]
-        config = {
-            "function": session.function,
-            "predicates": {p.statement: p.predicate for p in session.properties},
-            "examples": examples,
+        size = math.ceil(self.max_examples / self.batches)
+        sizes = [size] * (self.max_examples // size) + (
+            [self.max_examples % size] if self.max_examples % size else []
+        )
+        configs = [
+            {
+                "function": session.function,
+                "predicates": {p.statement: p.predicate for p in session.properties},
+                "examples": [],
+                "originals": [],
+                "variants": [],
+                "max_examples": n,
+                "seed": random.randrange(1, 2**31),  # fresh inputs every time
+                "call_timeout_s": self.call_timeout_s,
+            }
+            for n in sizes
+        ]
+        configs[0] |= {
+            "examples": originals + [case.args for case in edge_cases(session.params)],
             "originals": originals,
             "variants": nearby_variants(session.counterexamples),
-            "max_examples": self.max_examples,
-            "seed": random.randrange(1, 2**31),  # fresh inputs every time
-            "call_timeout_s": self.call_timeout_s,
         }
+
+        checked = 0
+        reports = []
+        runs = [self._run(session, fix, c, first=i == 0) for i, c in enumerate(configs)]
+        for done in asyncio.as_completed(runs):
+            report = await done
+            if isinstance(report, FixReport):  # timed out or crashed
+                return report
+            reports.append(report)
+            checked += report["max_examples"]
+            if on_progress is not None:
+                on_progress(checked, self.max_examples)
+
+        first = next(r for r in reports if r["first"])
+        base = FixReport(
+            "passed",
+            inputs_checked=sum(r["inputs_checked"] for r in reports),
+            original_failures=first["original_failures"],
+        )
+        if found := [ce for r in reports for ce in r["counterexamples"]]:
+            order = [p.statement for p in session.properties]
+            base.outcome, base.reason = "failed", "a property still fails"
+            base.counterexamples = [
+                ce.to_dict() for ce in dedupe([Counterexample(**d) for d in found], order)
+            ]
+        elif first["variant_failures"]:
+            base.outcome = "special_cased"
+            base.reason = "it fails on inputs right next to the original failing one"
+            base.counterexamples = first["variant_failures"][:1]
+        elif hard := hardcoded_literals(session.code, fix, session.counterexamples):
+            base.outcome, base.reason, base.hardcoded = (
+                "special_cased",
+                "it hard-codes the failing input",
+                hard,
+            )
+        return base
+
+    async def _run(
+        self, session: Session, fix: str, config: dict[str, Any], *, first: bool
+    ) -> dict[str, Any] | FixReport:
         harness = (
             "from hypothesis import strategies as st\n"
             "from sparring_partner.testing.harness import verify_fix\n\n"
@@ -164,27 +235,11 @@ class FixVerifier:
             return FixReport("failed", "the tests timed out on your fix")
         if result.error:
             return FixReport("failed", f"your fix doesn't run: {result.error.type}")
-
-        report = result.value
-        base = FixReport(
-            "passed",
-            inputs_checked=report["inputs_checked"],
-            original_failures=report["original_failures"],
-        )
-        if report["counterexamples"]:
-            base.outcome, base.reason = "failed", "a property still fails"
-            base.counterexamples = report["counterexamples"]
-        elif report["variant_failures"]:
-            base.outcome = "special_cased"
-            base.reason = "it fails on inputs right next to the original failing one"
-            base.counterexamples = report["variant_failures"][:1]
-        elif hard := hardcoded_literals(session.code, fix, session.counterexamples):
-            base.outcome, base.reason, base.hardcoded = (
-                "special_cased",
-                "it hard-codes the failing input",
-                hard,
-            )
-        return base
+        return {
+            **result.value,
+            "max_examples": config["max_examples"],
+            "first": first,
+        }
 
 
 # The next untested risk

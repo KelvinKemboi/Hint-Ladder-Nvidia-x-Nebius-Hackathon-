@@ -37,6 +37,7 @@ class Settings(BaseSettings):
     explore_call_timeout_s: float = 1.0
     # Fix verification: fresh inputs per property, with a new seed each time.
     verify_examples: int = 500
+    verify_batches: int = 5  # run in parallel; each finished batch is a progress event
 
     # Demo only: GET /api/sessions/{id}/gate-log shows blocked hints (and so the answers).
     expose_gate_log: bool = False

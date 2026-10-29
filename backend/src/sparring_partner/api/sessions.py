@@ -8,7 +8,7 @@ import asyncio
 from collections.abc import Iterator
 from contextlib import contextmanager
 from functools import lru_cache
-from typing import Annotated
+from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException, WebSocket
 from pydantic import BaseModel, Field
@@ -71,9 +71,12 @@ class ParamOut(BaseModel):
 
 class MessageOut(BaseModel):
     role: str  # "coach" or "user"
-    kind: str  # question, prediction, reveal, nudge, hint
+    kind: str  # question, prediction, reveal, nudge, hint, fix, fix_result, review, risk
     level: int  # the hint level when it was sent
     text: str
+    # For the UI, never more than `text` says: the prediction compared with the code's
+    # output (reveal, nudge), the trace table of a level 3 hint, a fix's outcome.
+    data: dict[str, Any] | None = None
 
 
 class PredictionQuestionOut(BaseModel):
@@ -85,10 +88,17 @@ class PredictionIn(BaseModel):
     answer: str = Field(min_length=1, max_length=2000, examples=["[[1, 5]]"])
 
 
+class ShownValue(BaseModel):
+    kind: str  # "value" or "error"
+    text: str  # a repr, or the error
+
+
 class PredictionOut(BaseModel):
     outcome: str  # revealed, agreed, matches_code, both_differ
     message: str
     actual: str  # what the code did, e.g. "returns `[[1, 4], [4, 5]]`"
+    predicted: ShownValue  # the prediction as it was read
+    returned: ShownValue  # what the code did
     state: SessionState
     hint_level: int
 
@@ -126,6 +136,8 @@ class PostmortemOut(BaseModel):
 class HintOut(BaseModel):
     level: int
     text: str
+    prose: str | None = None  # level 3: the text without the trace table
+    table: dict[str, Any] | None = None  # level 3: the trace table, as rows
 
 
 class SessionOut(BaseModel):
@@ -140,6 +152,7 @@ class SessionOut(BaseModel):
     properties: list[PropertyOut]
     hint_level: int
     failures_found: int  # a count only; the failures are revealed one at a time
+    has_postmortem: bool
     messages: list[MessageOut]  # gate-approved only
     created_at: float
 
@@ -162,8 +175,15 @@ class SessionOut(BaseModel):
             ],
             hint_level=s.hint_level,
             failures_found=len(s.counterexamples),
+            has_postmortem=s.postmortem is not None,
             messages=[
-                MessageOut(role=m["role"], kind=m["kind"], level=m["level"], text=m["text"])
+                MessageOut(
+                    role=m["role"],
+                    kind=m["kind"],
+                    level=m["level"],
+                    text=m["text"],
+                    data=m.get("data"),
+                )
                 for m in s.messages
             ],
             created_at=s.created_at,

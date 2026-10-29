@@ -55,8 +55,15 @@ def test_partial_fix_continues_with_the_next_failure_then_a_full_fix_passes(make
     assert pm["bug_class"] == "boundary condition"
     assert pm["fix_attempts"] == 2 and pm["hint_level_reached"] == 1
     assert [c["hint_level"] for c in pm["cases"]] == [1, 0]
-    kinds = [m["kind"] for m in client.get(f"/api/sessions/{sid}").json()["messages"]]
-    assert kinds[-2:] == ["fix_result", "risk"]
+    body = client.get(f"/api/sessions/{sid}").json()
+    assert body["has_postmortem"]
+    assert [m["kind"] for m in body["messages"]][-2:] == ["fix_result", "risk"]
+    assert body["messages"][-2]["data"] == {
+        "outcome": "passed",
+        "inputs_checked": second["inputs_checked"],
+    }
+    progress = [e for e in orchestrator.store.history(sid) if e.data.get("phase") == "verify"]
+    assert progress[-1].data == {"phase": "verify", "checked": 500, "total": 500}
 
 
 def test_a_failing_risk_becomes_the_next_question(make_client):
