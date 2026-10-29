@@ -27,14 +27,14 @@ class Counterexample:
     """A minimal failing input and what went wrong on it."""
 
     function: str
-    args: list[str] # repr of each positional argument
-    call: str # e.g. "merge([[1, 4], [4, 5]])"
-    violated_property: str # the property whose search found this input
+    args: list[str]  # repr of each positional argument
+    call: str  # e.g. "merge([[1, 4], [4, 5]])"
+    violated_property: str  # the property whose search found this input
     violated_properties: list[str] = field(default_factory=list)  # every property it breaks
-    output: str | None = None # repr of the return value; None if it raised
+    output: str | None = None  # repr of the return value; None if it raised
     exception_type: str | None = None
     exception_message: str | None = None
-    exception_line: int | None = None # line in the user's code where it raised
+    exception_line: int | None = None  # line in the user's code where it raised
     check_errors: dict[str, str] = field(default_factory=dict)  # property -> predicate error
     complexity: int = 0
 

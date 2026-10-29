@@ -20,7 +20,7 @@ class Event:
     """A progress event. Carries counts and states only, never test details."""
 
     seq: int
-    type: str # "state", "progress", "error"
+    type: str  # "state", "progress", "error"
     message: str
     data: dict[str, Any] = field(default_factory=dict)
     at: float = field(default_factory=time.time)

@@ -22,12 +22,12 @@ class Mode(StrEnum):
 
 
 class SessionState(StrEnum):
-    INTENT = "intent" # code + intent received, properties proposed
+    INTENT = "intent"  # code + intent received, properties proposed
     PROPERTIES_CONFIRMED = "properties_confirmed"
-    EXPLORING = "exploring" # secret bug hunt in the sandbox
-    PREDICTING = "predicting" # predict-then-reveal
+    EXPLORING = "exploring"  # secret bug hunt in the sandbox
+    PREDICTING = "predicting"  # predict-then-reveal
     HINTING = "hinting"
-    VERIFYING = "verifying" # checking the user's fix
+    VERIFYING = "verifying"  # checking the user's fix
     POSTMORTEM = "postmortem"
 
 
@@ -93,12 +93,12 @@ class Session:
     properties: list[PropertySpec] = field(default_factory=list)
 
     # --- server-only ---
-    worked_examples: list[tuple[Any, Any]] = field(default_factory=list) # (args, correct output)
+    worked_examples: list[tuple[Any, Any]] = field(default_factory=list)  # (args, correct output)
     strategy_code: str | None = None
-    counterexamples: list[dict[str, Any]] = field(default_factory=list) # revealed one at a time
+    counterexamples: list[dict[str, Any]] = field(default_factory=list)  # revealed one at a time
     diagnosis: Diagnosis | None = None
 
-    messages: list[dict[str, Any]] = field(default_factory=list) # gate-approved only
+    messages: list[dict[str, Any]] = field(default_factory=list)  # gate-approved only
     gate_log: list[dict[str, Any]] = field(default_factory=list)
     fix_attempts: list[dict[str, Any]] = field(default_factory=list)
     postmortem: dict[str, Any] | None = None
