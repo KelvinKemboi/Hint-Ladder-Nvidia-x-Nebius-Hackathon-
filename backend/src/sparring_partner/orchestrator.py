@@ -2,12 +2,22 @@
 
 import asyncio
 import logging
+import time
 from collections.abc import Coroutine
 from typing import Any
 
 from sparring_partner.agents.code_info import FunctionInfo, pick_function
-from sparring_partner.agents.diagnosis import Diagnoser
-from sparring_partner.agents.errors import GenerationError, UserCodeError
+from sparring_partner.agents.diagnosis import Diagnoser, counterexample_args
+from sparring_partner.agents.errors import GenerationError, NotAvailable, UserCodeError
+from sparring_partner.agents.gate import HintGate
+from sparring_partner.agents.hints import HintWriter
+from sparring_partner.agents.predict import (
+    Prediction,
+    current_case,
+    describe_actual,
+    parse_prediction,
+    question,
+)
 from sparring_partner.agents.properties import PropertyProposer, PropertyValidationError
 from sparring_partner.agents.testgen import (
     JsonLLM,
@@ -19,6 +29,7 @@ from sparring_partner.agents.testgen import (
 from sparring_partner.config import Settings, get_settings
 from sparring_partner.sandbox import Sandbox
 from sparring_partner.session import (
+    MAX_HINT_LEVEL,
     InvalidTransition,
     Mode,
     PropertySpec,
@@ -51,6 +62,8 @@ class Orchestrator:
             max_examples=self.settings.explore_max_examples,
             call_timeout_s=self.settings.explore_call_timeout_s,
         )
+        self.gate = HintGate(llm, sandbox, call_timeout_s=self.settings.explore_call_timeout_s)
+        self.hints = HintWriter(llm, self.gate, self.diagnoser)
         self._tasks: set[asyncio.Task[Any]] = set()
 
     async def create(
@@ -175,6 +188,145 @@ class Orchestrator:
         else:
             self._progress(session, "Root cause found, but the fix could not be verified")
 
+    # Predict, then reveal
+    async def prediction_question(self, session_id: str) -> dict[str, str]:
+        """'What should f(x) return?' for the current failing case."""
+        session = self.store.get(session_id)
+        _require(session, S.PREDICTING, S.HINTING)
+        text = question(session)
+        asked = any(
+            m["kind"] == "question" and m["case"] == session.current_case for m in session.messages
+        )
+        if not asked:
+            await self._say(session, [text], kind="question")
+        return {"question": text, "call": current_case(session)["call"]}
+
+    async def submit_prediction(self, session_id: str, answer: str) -> dict[str, Any]:
+        """Run the code, compare with the user's prediction, and reveal (or nudge).
+
+        The correct answer itself is never shown: a wrong prediction is pointed
+        back at the user's own spec instead.
+        """
+        session = self.store.get(session_id)
+        _require(session, S.PREDICTING, S.HINTING)
+        prediction = parse_prediction(answer)  # PredictionParseError -> 422
+        self._record(session, "user", "prediction", answer)
+
+        result = await self._evaluate_prediction(session, prediction)
+        actual = result["actual"]
+        if result["reference"] is not None:
+            correct = result["matches_reference"]
+        else:
+            correct = prediction.kind == "value" and not result["violates"]
+
+        ce = current_case(session)
+        spec_line = _spec_reminder(session, result, prediction)
+        safer_nudge = (
+            "Check your answer against your spec again: "
+            f"what should a correct {session.function}() return?"
+        )
+        if correct and not result["matches_actual"]:
+            outcome = "revealed"
+            texts = [
+                f"You expected {prediction.describe()}. The code {describe_actual(actual)}. "
+                "Your prediction fits the spec and the code's answer doesn't: that gap is the bug."
+            ]
+        elif correct:
+            outcome = "agreed"
+            texts = [f"The code agrees with you on `{ce['call']}`."]
+        elif result["matches_actual"]:
+            outcome = "matches_code"
+            texts = [
+                f"That's exactly what the code does: it {describe_actual(actual)}. "
+                f"But does that fit your spec? {spec_line}",
+                f"That's exactly what the code does. {safer_nudge}",
+            ]
+        else:
+            outcome = "both_differ"
+            texts = [
+                f"The code {describe_actual(actual)}. Your answer doesn't fit your spec either. "
+                f"{spec_line}",
+                f"The code {describe_actual(actual)}. {safer_nudge}",
+            ]
+
+        session.hint_level = max(session.hint_level, 1)  # the symptom is now on the table
+        message = await self._say(session, texts, kind="reveal" if correct else "nudge")
+        if outcome == "revealed" and session.state is S.PREDICTING:
+            self._move(session, S.HINTING)
+        return {
+            "outcome": outcome,
+            "message": message,
+            "actual": describe_actual(actual),
+            "state": session.state.value,
+            "hint_level": session.hint_level,
+        }
+
+    async def _evaluate_prediction(
+        self, session: Session, prediction: Prediction
+    ) -> dict[str, Any]:
+        d = session.diagnosis
+        config = {
+            "function": session.function,
+            "args": counterexample_args(current_case(session)),
+            "predicted": prediction.as_config(),
+            "predicates": {p.statement: p.predicate for p in session.properties},
+            "reference_fix": d.reference_fix if d is not None and d.verified else None,
+            "call_timeout_s": self.settings.explore_call_timeout_s,
+        }
+        harness = (
+            "from sparring_partner.testing.harness import evaluate_prediction\n\n"
+            f"CONFIG = {config!r}\n\n\n"
+            "def run(solution, inputs):\n"
+            "    return evaluate_prediction(solution, CONFIG)\n"
+        )
+        result = await self.sandbox.run(session.code, harness)
+        if not result.ok:
+            raise UserCodeError("couldn't run your code on that input")
+        return result.value
+
+    # Hints
+    async def next_hint(self, session_id: str) -> dict[str, Any]:
+        """Climb one rung of the hint ladder and return the gate-approved hint."""
+        session = self.store.get(session_id)
+        _require(session, S.PREDICTING, S.HINTING)
+        if session.diagnosis is None:
+            raise NotAvailable("hints aren't available: the bug couldn't be diagnosed")
+        if session.hint_level >= MAX_HINT_LEVEL:
+            raise NotAvailable("that was the last hint: the next step is your fix")
+        if session.state is S.PREDICTING:
+            self._move(session, S.HINTING)
+        level = session.climb_hint()
+        text = await self.hints.write(session, level)
+        self._record(session, "coach", "hint", text, level=level)
+        return {"level": level, "text": text}
+
+    async def _say(self, session: Session, texts: list[str], *, kind: str) -> str:
+        """Send the first of `texts` the gate allows (fixed templates: no model layer)."""
+        for text in texts:
+            decision = await self.gate.check(
+                session, text, session.hint_level, kind=kind, use_llm=False
+            )
+            if decision.allowed:
+                break
+        self._record(session, "coach", kind, text)
+        return text
+
+    def _record(
+        self, session: Session, role: str, kind: str, text: str, *, level: int | None = None
+    ) -> None:
+        level = session.hint_level if level is None else level
+        session.messages.append(
+            {
+                "role": role,
+                "kind": kind,
+                "level": level,
+                "text": text,
+                "case": session.current_case,
+                "at": time.time(),
+            }
+        )
+        self.store.publish(session.id, "message", text, role=role, kind=kind, level=level)
+
     async def wait_idle(self) -> None:
         """Wait for background work (exploration) to finish."""
         while self._tasks:
@@ -200,3 +352,19 @@ def _pick(code: str, intent: str, function: str | None) -> FunctionInfo:
         raise UserCodeError(f"SyntaxError on line {exc.lineno}: {exc.msg}") from exc
     except ValueError as exc:
         raise UserCodeError(str(exc)) from exc
+
+
+def _require(session: Session, *states: SessionState) -> None:
+    if session.state not in states:
+        raise InvalidTransition(f"not available in state {session.state}")
+
+
+def _spec_reminder(session: Session, result: dict[str, Any], prediction: Prediction) -> str:
+    if result["violates"]:
+        return f'Check it against: "{result["violates"][0].rstrip(".")}".'
+    if prediction.kind == "error":
+        return "Would a correct implementation really fail on this input?"
+    return (
+        f'Re-read the intent: "{session.intent}". '
+        f"What should a correct {session.function}() return?"
+    )

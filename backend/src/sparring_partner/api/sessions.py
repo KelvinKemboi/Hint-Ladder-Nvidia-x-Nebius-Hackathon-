@@ -13,8 +13,10 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, HTTPException, WebSocket
 from pydantic import BaseModel, Field
 
-from sparring_partner.agents.errors import GenerationError, UserCodeError
+from sparring_partner.agents.errors import GenerationError, NotAvailable, UserCodeError
+from sparring_partner.agents.predict import PredictionParseError
 from sparring_partner.agents.properties import PropertyValidationError
+from sparring_partner.config import get_settings
 from sparring_partner.llm import StructuredOutputError, get_llm
 from sparring_partner.orchestrator import Orchestrator
 from sparring_partner.sandbox import SandboxConfigError, get_sandbox
@@ -67,6 +69,35 @@ class ParamOut(BaseModel):
     description: str
 
 
+class MessageOut(BaseModel):
+    role: str  # "coach" or "user"
+    kind: str  # question, prediction, reveal, nudge, hint
+    level: int  # the hint level when it was sent
+    text: str
+
+
+class PredictionQuestionOut(BaseModel):
+    question: str
+    call: str
+
+
+class PredictionIn(BaseModel):
+    answer: str = Field(min_length=1, max_length=2000, examples=["[[1, 5]]"])
+
+
+class PredictionOut(BaseModel):
+    outcome: str  # revealed, agreed, matches_code, both_differ
+    message: str
+    actual: str  # what the code did, e.g. "returns `[[1, 4], [4, 5]]`"
+    state: SessionState
+    hint_level: int
+
+
+class HintOut(BaseModel):
+    level: int
+    text: str
+
+
 class SessionOut(BaseModel):
     id: str
     mode: Mode
@@ -79,6 +110,7 @@ class SessionOut(BaseModel):
     properties: list[PropertyOut]
     hint_level: int
     failures_found: int  # a count only; the failures are revealed one at a time
+    messages: list[MessageOut]  # gate-approved only
     created_at: float
 
     @classmethod
@@ -100,6 +132,10 @@ class SessionOut(BaseModel):
             ],
             hint_level=s.hint_level,
             failures_found=len(s.counterexamples),
+            messages=[
+                MessageOut(role=m["role"], kind=m["kind"], level=m["level"], text=m["text"])
+                for m in s.messages
+            ],
             created_at=s.created_at,
         )
 
@@ -117,8 +153,10 @@ def _errors() -> Iterator[None]:
         raise HTTPException(
             422, {"message": "some properties could not be checked", "errors": exc.errors}
         ) from exc
-    except UserCodeError as exc:
+    except (UserCodeError, PredictionParseError) as exc:
         raise HTTPException(422, str(exc)) from exc
+    except NotAvailable as exc:
+        raise HTTPException(409, str(exc)) from exc
     except (GenerationError, StructuredOutputError) as exc:
         raise HTTPException(502, f"the model could not complete this step: {exc}") from exc
     except SandboxConfigError as exc:
@@ -148,6 +186,40 @@ async def confirm_properties(
         edits = [(p.id, p.statement) for p in body.properties]
         session = await orchestrator.confirm_properties(session_id, edits)
     return SessionOut.from_session(session)
+
+
+@router.get("/{session_id}/prediction")
+async def get_prediction_question(
+    session_id: str, orchestrator: OrchestratorDep
+) -> PredictionQuestionOut:
+    """Predict-then-reveal: what should the failing call return?"""
+    with _errors():
+        return PredictionQuestionOut(**await orchestrator.prediction_question(session_id))
+
+
+@router.post("/{session_id}/prediction")
+async def submit_prediction(
+    session_id: str, body: PredictionIn, orchestrator: OrchestratorDep
+) -> PredictionOut:
+    """Run the code and compare it with the prediction; never reveals the right answer."""
+    with _errors():
+        return PredictionOut(**await orchestrator.submit_prediction(session_id, body.answer))
+
+
+@router.post("/{session_id}/hint")
+async def next_hint(session_id: str, orchestrator: OrchestratorDep) -> HintOut:
+    """Climb one level of the hint ladder (1 symptom ... 5 line)."""
+    with _errors():
+        return HintOut(**await orchestrator.next_hint(session_id))
+
+
+@router.get("/{session_id}/gate-log", include_in_schema=False)
+async def gate_log(session_id: str, orchestrator: OrchestratorDep) -> list[dict]:
+    """Demo only (EXPOSE_GATE_LOG=true): every gate decision, including blocked text."""
+    if not get_settings().expose_gate_log:
+        raise HTTPException(404, "not found")
+    with _errors():
+        return orchestrator.store.get(session_id).gate_log
 
 
 @router.websocket("/{session_id}/stream")

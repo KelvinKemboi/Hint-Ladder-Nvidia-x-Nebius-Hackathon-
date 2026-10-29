@@ -98,7 +98,9 @@ class Session:
     worked_examples: list[tuple[Any, Any]] = field(default_factory=list)  # (args, correct output)
     strategy_code: str | None = None
     counterexamples: list[dict[str, Any]] = field(default_factory=list)  # revealed one at a time
-    trace: dict[str, Any] | None = None # locals per line for the top counterexample
+    trace: dict[str, Any] | None = None  # locals per line for the top counterexample
+    evidence: dict[str, Any] | None = None  # the trace windowed for level 3
+    current_case: int = 0  # which counterexample is being worked on
     diagnosis: Diagnosis | None = None
 
     messages: list[dict[str, Any]] = field(default_factory=list)  # gate-approved only

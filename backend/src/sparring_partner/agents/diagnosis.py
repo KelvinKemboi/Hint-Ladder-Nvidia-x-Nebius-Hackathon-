@@ -61,8 +61,11 @@ class Diagnoser:
         self.max_examples = max_examples
         self.call_timeout_s = call_timeout_s
 
-    async def trace(self, session: Session) -> dict[str, Any] | None:
-        """Line-by-line locals for the top counterexample, recorded in the sandbox."""
+    async def trace(self, session: Session, code: str | None = None) -> dict[str, Any] | None:
+        """Line-by-line locals for the top counterexample, recorded in the sandbox.
+
+        `code` traces other code (e.g. the reference fix) on the same input.
+        """
         if not session.counterexamples:
             return None
         config = {
@@ -77,7 +80,7 @@ class Diagnoser:
             "def run(solution, inputs):\n"
             "    return trace_call(solution, CONFIG)\n"
         )
-        result = await self.sandbox.run(session.code, harness)
+        result = await self.sandbox.run(code or session.code, harness)
         if not result.ok:
             logger.warning("tracing failed: %s", result.error or "timed out")
             return None

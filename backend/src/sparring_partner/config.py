@@ -36,6 +36,9 @@ class Settings(BaseSettings):
     explore_max_examples: int = 200
     explore_call_timeout_s: float = 1.0
 
+    # Demo only: GET /api/sessions/{id}/gate-log shows blocked hints (and so the answers).
+    expose_gate_log: bool = False
+
     cors_origins: list[str] = ["http://localhost:5173"]
 
 

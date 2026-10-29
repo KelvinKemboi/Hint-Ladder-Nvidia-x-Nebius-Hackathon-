@@ -12,22 +12,18 @@ from fakes import (
     FakeLLM,
     prop,
 )
-from fastapi.testclient import TestClient
 
-from sparring_partner.api.sessions import SessionOut, get_orchestrator
-from sparring_partner.config import Settings
+from sparring_partner.api.sessions import SessionOut
 from sparring_partner.main import app
-from sparring_partner.orchestrator import Orchestrator
-from sparring_partner.sandbox import LocalBackend, Sandbox
-from sparring_partner.session import SessionStore
 
-SETTINGS = Settings(_env_file=None, explore_max_examples=60, sandbox_timeout_s=60)
 # Fields that must never reach the client.
 SERVER_ONLY = {
     "diagnosis",
     "counterexamples",
     "strategy_code",
     "trace",
+    "evidence",
+    "current_case",
     "worked_examples",
     "gate_log",
     "reference_fix",
@@ -54,26 +50,6 @@ def merge_llm(**extra) -> FakeLLM:
     for name, queue in extra.items():
         replies[name] = replies.get(name, []) + queue
     return FakeLLM(**replies)
-
-
-@pytest.fixture
-def make_client():
-    clients = []
-
-    def make(llm):
-        orchestrator = Orchestrator(
-            SessionStore(), llm, Sandbox(LocalBackend(), SETTINGS), SETTINGS
-        )
-        app.dependency_overrides[get_orchestrator] = lambda: orchestrator
-        client = TestClient(app)
-        client.__enter__()
-        clients.append(client)
-        return client, orchestrator
-
-    yield make
-    for client in clients:
-        client.__exit__(None, None, None)
-    app.dependency_overrides.clear()
 
 
 def create(client) -> dict:

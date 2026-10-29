@@ -18,6 +18,8 @@ from sparring_partner.testing.capture import (
     _as_args,
     _call,
     _CallTimeout,
+    _check,
+    _Outcome,
     _time_limit,
     find_counterexamples,
 )
@@ -226,3 +228,97 @@ def trace_call(solution: Any, config: dict[str, Any]) -> dict[str, Any]:
 def _short(value: Any, limit: int = 80) -> str:
     text = repr(value)
     return text if len(text) <= limit else text[: limit - 3] + "..."
+
+
+def evaluate_prediction(solution: Any, config: dict[str, Any]) -> dict[str, Any]:
+    """Compare the user's prediction with the actual output, the reference fix and the spec."""
+    timeout = config.get("call_timeout_s")
+    name = config["function"]
+    args = _as_args(config["args"])
+    predicted = config["predicted"]
+    actual = _call(getattr(solution, name), args, timeout)
+
+    reference = None
+    if config.get("reference_fix"):
+        reference_fn = _load_function(config["reference_fix"], name, timeout)
+        if reference_fn is not None:
+            reference = _call(reference_fn, args, timeout)
+
+    violates = []
+    if predicted["kind"] == "value":
+        for statement, source in config["predicates"].items():
+            try:
+                prop = Property(statement, load_predicate(source))
+            except Exception:
+                continue
+            if _check(prop, args, predicted["value"], timeout) == "":
+                violates.append(statement)
+
+    return {
+        "actual": _describe_outcome(actual),
+        "reference": reference and _describe_outcome(reference),
+        "matches_actual": _matches(predicted, actual),
+        "matches_reference": None if reference is None else _matches(predicted, reference),
+        "violates": violates,
+    }
+
+
+def fixes_failure(solution: Any, config: dict[str, Any]) -> dict[str, Any]:
+    """Does any code variant make a counterexample satisfy every property?
+
+    `solution` is unused: variants are full sources compiled here, in the sandbox.
+    """
+    timeout = config.get("call_timeout_s")
+    properties = []
+    for statement, source in config["predicates"].items():
+        try:
+            properties.append(Property(statement, load_predicate(source)))
+        except Exception:
+            continue
+    for index, variant in enumerate(config["variants"]):
+        fn = _load_function(variant, config["function"], timeout)
+        if fn is None:
+            continue
+        for raw_args in config["cases"]:
+            args = _as_args(raw_args)
+            outcome = _call(fn, args, timeout)
+            if outcome.exception is None and all(
+                _check(p, args, outcome.output, timeout) is None for p in properties
+            ):
+                return {"fixed": True, "variant": index}
+    return {"fixed": False, "variant": None}
+
+
+def _load_function(source: str, name: str, timeout: float | None) -> Any:
+    namespace: dict[str, Any] = {"__name__": "candidate"}
+    try:
+        with _time_limit(timeout):
+            exec(compile(source, "<candidate>", "exec"), namespace)
+    except BaseException:  # a candidate may raise anything, including our timeout
+        return None
+    fn = namespace.get(name)
+    return fn if callable(fn) else None
+
+
+def _describe_outcome(outcome: _Outcome) -> dict[str, Any]:
+    if outcome.exception is not None:
+        exc = outcome.exception
+        return {"output": None, "error": f"{type(exc).__name__}: {exc}"}
+    return {"output": _short(outcome.output, 2000), "error": None}
+
+
+def _matches(predicted: dict[str, Any], outcome: _Outcome) -> bool:
+    if predicted["kind"] == "error":
+        return outcome.exception is not None
+    return outcome.exception is None and _normalize(predicted["value"]) == _normalize(
+        outcome.output
+    )
+
+
+def _normalize(value: Any) -> Any:
+    """Tolerate list-vs-tuple differences: [(1, 5)] counts as [[1, 5]]."""
+    if isinstance(value, list | tuple):
+        return [_normalize(v) for v in value]
+    if isinstance(value, dict):
+        return {k: _normalize(v) for k, v in value.items()}
+    return value

@@ -130,7 +130,8 @@ BANNED_CALLS = {"open", "exec", "eval", "compile", "__import__", "input"}
 class JsonLLM(Protocol):
     async def complete_json(
         self, role: Role, messages: list[Message], schema: type[SchemaT], **kwargs: Any
-    ) -> SchemaT: ...
+    ) -> SchemaT:
+        ...
 
 
 @dataclass(frozen=True)
