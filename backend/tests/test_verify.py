@@ -124,7 +124,7 @@ async def test_invalid_fixes(sandbox, fix, reason):
     assert report.outcome == "invalid" and reason in report.reason
 
 
-# Next risk and post-mortem 
+# Next risk and post-mortem
 async def test_next_risk_is_tested_against_the_code(sandbox):
     risk = {"question": "What if the input isn't sorted?", "example_args": "([[3, 4], [1, 2]],)"}
     llm = FakeLLM(RiskDraft=[risk, risk])

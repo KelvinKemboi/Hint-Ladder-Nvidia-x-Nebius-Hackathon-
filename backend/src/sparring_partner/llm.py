@@ -128,7 +128,11 @@ class LLM:
         retries: int = 2,
         **kwargs: Any,
     ) -> SchemaT:
-        """Completion parsed into `schema`; on invalid output, show the error and retry."""
+        """Completion parsed into `schema`; on invalid output, show the error and retry.
+
+        Uses the API's JSON mode unless the caller passes its own `response_format`.
+        """
+        kwargs.setdefault("response_format", {"type": "json_object"})
         instruction = (
             "Reply with only a JSON object that matches this JSON Schema, with no other text. "
             "Send the data itself (an instance), not a copy of the schema:\n"

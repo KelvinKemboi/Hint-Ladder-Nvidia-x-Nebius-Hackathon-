@@ -123,6 +123,12 @@ async def test_review_finds_the_usual_ai_code_failures():
                 "example_args": "([[4, 5], [1, 2], [2, 3]],)",
             },
             {
+                "kind": "wrong_assumption",
+                "detail": "invalid input from the model",
+                "question": "What about backwards intervals?",
+                "example_args": "([(5, 2), (3, 4)],)",  # start > end: not a valid input
+            },
+            {
                 "kind": "missing_edge_case",
                 "detail": "fine on a single interval",
                 "question": "What about just one interval?",
@@ -145,8 +151,10 @@ async def test_review_finds_the_usual_ai_code_failures():
     assumptions = [f.question for f in by_kind["assumption"]]
     assert any("input that isn't sorted" in q for q in assumptions)
     # The LLM's suggested inputs were run: the failing one is now a counterexample.
-    wrong, missing = by_kind["wrong_assumption"][0], by_kind["missing_edge_case"][0]
+    wrong, invalid = by_kind["wrong_assumption"]
+    missing = by_kind["missing_edge_case"][0]
     assert wrong.counterexample["call"] == "merge_intervals([[4, 5], [1, 2], [2, 3]])"
+    assert invalid.counterexample is None  # never run: not a valid input
     assert missing.counterexample is None
     assert [ce["call"] for ce in session.counterexamples] == [
         TOUCHING["call"],

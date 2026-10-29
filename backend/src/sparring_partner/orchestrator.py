@@ -325,7 +325,7 @@ class Orchestrator:
         self._record(session, "coach", "hint", text, level=level)
         return {"level": level, "text": text}
 
-    # Fix verification and the post-mortem 
+    # Fix verification and the post-mortem
     async def submit_fix(self, session_id: str, code: str) -> dict[str, Any]:
         """Verify a fix; a new failure starts the predict -> hint loop again."""
         session = self.store.get(session_id)

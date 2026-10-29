@@ -225,6 +225,15 @@ def _kind_from_annotation(annotation: str | None, intent: str) -> str:
     return "other"
 
 
+def args_fit(args: tuple[Any, ...], params: list[ParamSpec]) -> bool:
+    """Do the arguments have the shape their parameter kinds promise?"""
+    from sparring_partner.testing.harness import KIND_CHECKS
+
+    return len(args) == len(params) and all(
+        KIND_CHECKS.get(p.kind, lambda _: True)(arg) for arg, p in zip(args, params, strict=True)
+    )
+
+
 def _literal_args(text: str, arity: int) -> tuple[Any, ...] | None:
     try:
         value = ast.literal_eval(text)

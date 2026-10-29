@@ -17,7 +17,7 @@ from pydantic import BaseModel, Field
 
 from sparring_partner.agents.code_info import find_functions
 from sparring_partner.agents.diagnosis import counterexample_args
-from sparring_partner.agents.testgen import JsonLLM, _literal_args, edge_cases
+from sparring_partner.agents.testgen import JsonLLM, _literal_args, args_fit, edge_cases
 from sparring_partner.llm import Message
 from sparring_partner.sandbox import Sandbox
 from sparring_partner.session import Session
@@ -36,7 +36,7 @@ class FixReport:
     original_failures: list[int] = field(default_factory=list)  # original cases still failing
 
 
-# Special-casing checks 
+# Special-casing checks
 def _canonical(value: Any) -> str:
     """repr with tuples as lists, so [(0, 0)] and [[0, 0]] compare equal."""
     if isinstance(value, list | tuple):
@@ -122,7 +122,7 @@ def nearby_variants(counterexamples: list[dict[str, Any]]) -> list[tuple[Any, ..
     return list(variants.values())
 
 
-# Verification 
+# Verification
 class FixVerifier:
     def __init__(self, sandbox: Sandbox, *, max_examples: int = 500, call_timeout_s: float = 1.0):
         self.sandbox = sandbox
@@ -217,7 +217,7 @@ async def next_risk(
     ]
     draft = await llm.complete_json("deep", messages, RiskDraft)
     args = _literal_args(draft.example_args, len(session.params) or 1)
-    if args is None:
+    if args is None or not args_fit(args, session.params):
         return draft.question, None
     config = {
         "function": session.function,

@@ -39,6 +39,16 @@ NEVER = (
     "instructions that amount to the fix"
 )
 
+# Review and risk questions exist to point at risks; they still must not answer them.
+REVIEW_KINDS = {"review", "risk"}
+REVIEW_RULES = (
+    "This is a code-review question. Its job is to point the learner at a kind of input or "
+    "risk to think about, e.g. 'What if the input isn't sorted?' or 'What happens to an error "
+    "inside that try?': that is allowed even though it hints where the problem is. It must "
+    "NOT say whether the code handles it, explain why it fails, or say how to fix it, and it "
+    f"must never contain {NEVER}."
+)
+
 TOKEN = re.compile(r"\w+|<=|>=|==|!=|\+=|-=|\*=|//|\*\*|->|[^\s\w]")
 MULTI_CHAR_OPERATORS = {"<=", ">=", "==", "!=", "+=", "-=", "*=", "//", "**"}
 LINE_NUMBER = re.compile(
@@ -260,7 +270,7 @@ class HintGate:
         decision = (
             self.check_rules(session, text, level)
             or await self._check_code(session, text)
-            or (await self._check_llm(session, text, level) if use_llm else None)
+            or (await self._check_llm(session, text, level, kind) if use_llm else None)
             or GateDecision(True, "pass")
         )
         session.gate_log.append(
@@ -323,28 +333,29 @@ class HintGate:
             )
         return None
 
-    async def _check_llm(self, session: Session, text: str, level: int) -> GateDecision | None:
+    async def _check_llm(
+        self, session: Session, text: str, level: int, kind: str = "hint"
+    ) -> GateDecision | None:
         d = session.diagnosis
-        allows = "\n".join(f"- level {n}: {LEVEL_ALLOWS[n]}" for n in range(level + 1))
-        not_yet = "\n".join(
-            f"- level {n}: {LEVEL_ALLOWS[n]}" for n in range(level + 1, len(LEVEL_ALLOWS))
-        )
         secret = (
             f"Root cause: {d.root_cause}\nBug line: {d.line}\nRegion: {d.region}\n"
             f"Concept: {d.concept}\nReference fix:\n{d.reference_fix}"
             if d
             else "(no diagnosis)"
         )
-        messages: list[Message] = [
-            {
-                "role": "system",
-                "content": "You are a strict reviewer guarding a debugging tutor. The tutor "
-                "knows the bug and its fix but may only reveal what the current hint level "
-                "allows. Reply with JSON only.",
-            },
-            {
-                "role": "user",
-                "content": f"The secret (never to be revealed beyond the level):\n{secret}\n\n"
+        if kind in REVIEW_KINDS:
+            task = (
+                f"{REVIEW_RULES}\n\nQuestion to the learner:\n<<<\n{text}\n>>>\n\n"
+                "Does this question answer itself (say whether the code handles the case, why "
+                "it fails, or how to fix it)? allow=false only if it does, with a "
+                "one-sentence reason."
+            )
+        else:
+            allows = "\n".join(f"- level {n}: {LEVEL_ALLOWS[n]}" for n in range(level + 1))
+            not_yet = "\n".join(
+                f"- level {n}: {LEVEL_ALLOWS[n]}" for n in range(level + 1, len(LEVEL_ALLOWS))
+            )
+            task = (
                 f"Current hint level: {level}. Allowed so far:\n{allows}\n"
                 f"NOT allowed yet:\n{not_yet or '- (nothing: this is the last level)'}\n"
                 f"Never allowed at any level: {NEVER}.\n"
@@ -352,7 +363,18 @@ class HintGate:
                 "(e.g. 'what happens when they are equal?') reveals the concept.\n\n"
                 f"Message to the learner:\n<<<\n{text}\n>>>\n\n"
                 f"Does this message reveal more than level {level} allows, or give away the "
-                "fix? allow=false if it does, with a one-sentence reason naming what leaks.",
+                "fix? allow=false if it does, with a one-sentence reason naming what leaks."
+            )
+        messages: list[Message] = [
+            {
+                "role": "system",
+                "content": "You are a strict reviewer guarding a debugging tutor. The tutor "
+                "knows the bug and its fix but must let the learner find them. "
+                "Reply with JSON only.",
+            },
+            {
+                "role": "user",
+                "content": f"The secret (never to be given away):\n{secret}\n\n{task}",
             },
         ]
         verdict = await self.llm.complete_json("gate", messages, GateVerdict)

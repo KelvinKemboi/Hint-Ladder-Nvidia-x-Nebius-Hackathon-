@@ -17,7 +17,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
-from sparring_partner.agents.testgen import JsonLLM, _literal_args, edge_cases
+from sparring_partner.agents.testgen import JsonLLM, _literal_args, args_fit, edge_cases
 from sparring_partner.llm import Message
 from sparring_partner.sandbox import Sandbox
 from sparring_partner.session import Session
@@ -186,7 +186,7 @@ def api_references(code: str) -> list[dict[str, Any]]:
     return [refs[k] for k in keys if not any(o.startswith(k + ".") for o in keys)]
 
 
-# Review 
+# Review
 class Concern(BaseModel):
     kind: Literal[
         "intent_mismatch", "missing_edge_case", "wrong_assumption", "invented_api",
@@ -286,7 +286,12 @@ class Reviewer:
 
         inputs = {i: _literal_args(c.example_args, len(session.params) or 1)
                   for i, c in enumerate(draft.concerns)}  # fmt: skip
-        runnable = {i: args for i, args in inputs.items() if args is not None}
+        # Only valid inputs can count against the code: [(5, 2)] isn't an interval list.
+        runnable = {
+            i: args
+            for i, args in inputs.items()
+            if args is not None and args_fit(args, session.params)
+        }
         failures = await self._failures(session, list(runnable.values()))
         failing = {list(runnable)[j]: ce for j, ce in failures.items()}
 

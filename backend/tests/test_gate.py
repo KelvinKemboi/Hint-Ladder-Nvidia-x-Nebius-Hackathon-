@@ -266,3 +266,16 @@ def test_concept_words_match_inflections_and_skip_generic_words():
     assert mentions_concept("Something goes wrong here.", terms) is None  # generic
     assert mentions_concept("Think about the ordering.", terms) == "ordering"
     assert mentions_concept("What's the assumption?", terms) == "assumption"
+
+
+@pytest.mark.anyio
+async def test_review_questions_get_the_review_allowance(gate_with):
+    gate, llm = gate_with(ALLOW, ALLOW)
+    await gate.check(session(), "What if the input isn't sorted?", 0, kind="review")
+    await gate.check(session(), "Which part of your spec breaks?", 1, kind="hint")
+    review_prompt, hint_prompt = (m[-1]["content"] for m in llm.asked("GateVerdict"))
+    assert "This is a code-review question" in review_prompt
+    assert "Does this question answer itself" in review_prompt
+    assert "hint level" not in review_prompt.lower()  # not judged against the ladder
+    assert "This is a code-review question" not in hint_prompt
+    assert "Current hint level: 1" in hint_prompt

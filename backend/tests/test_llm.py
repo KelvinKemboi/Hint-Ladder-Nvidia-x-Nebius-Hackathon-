@@ -72,6 +72,7 @@ async def test_complete_json_parses_reply_with_reasoning_and_fence():
 
     assert hint == Hint(level=1, text="Try []")
     assert "JSON Schema" in completions.calls[0]["messages"][-1]["content"]
+    assert completions.calls[0]["response_format"] == {"type": "json_object"}
 
 
 async def test_complete_json_retries_with_the_validation_error():
