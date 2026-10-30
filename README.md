@@ -13,7 +13,7 @@ Built for the **Coding and Agentic Engineering** track: agents that write, run, 
 Requirements: Python 3.11+, [uv](https://docs.astral.sh/uv/), Node 20.19+.
 
 ```bash
-cp .env.example .env        # add your Token Factory key and model IDs
+cp .env.example .env # add your Token Factory key and model IDs
 ```
 
 **Backend** (http://localhost:8000):
@@ -67,11 +67,11 @@ cd frontend && npm run build
 ## Layout
 
 ```
-backend/    FastAPI app (src/sparring_partner), tests
-frontend/   React + Vite web UI
-demo/       The three demo bugs, their walkthrough and recorded runs
-docs/       Project outline
-scripts/    GitHub issue setup
+backend/ FastAPI app (src/sparring_partner), tests
+frontend/ React + Vite web UI
+demo/ The three demo bugs, their walkthrough and recorded runs
+docs/ Project outline
+scripts/ GitHub issue setup
 ```
 
 ## Docs
