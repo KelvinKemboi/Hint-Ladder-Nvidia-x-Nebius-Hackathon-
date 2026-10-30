@@ -29,39 +29,40 @@ class LRUCache:
 ```
 
 ## Properties
-- `  33.6s` **proposed**: 3 properties for `LRUCache`
-  - For every get operation, the returned value equals the value most recently put for that key, or -1 if the key has never been put or has been evicted.
-  - Every put operation returns None.
-  - The LRUCache constructor returns None and the capacity is a positive integer.
+- `  70.7s` **proposed**: 4 properties for `LRUCache`
+  - get returns the value most recently put for that key, or -1 if the key has never been put or has been evicted.
+  - put returns None and does not affect the cache size beyond adding or updating the key.
+  - The cache never holds more than capacity items at any point.
+  - When a key is accessed via get, it becomes the most recently used, so it is not evicted before keys that have not been accessed since.
 
 ## The hunt
-- `  33.6s` **learner adds**: get(key) returns the value most recently put for key, or -1 if it was never put or was evicted; a get counts as a use, so the evicted key is always the one least recently put or read.
-- `  33.6s` **progress**: Reading the LRUCache class and proposing properties
-- `  33.6s` **progress**: Proposed 3 properties
-- `  33.6s` **progress**: Writing checks for 1 edited properties
-- `  52.6s` **progress**: Writing an input generator
-- `  82.0s` **progress**: Testing 4 properties on 200 generated call sequences each, plus 0 edge cases
-- `  88.9s` **progress**: Found 1 distinct failure(s)
-- `  88.9s` **progress**: Working out the root cause
-- ` 100.0s` **progress**: Root cause found and fix verified
-- ` 101.2s` **question**: After `cache = LRUCache(3); cache.put(1, 1); cache.put(2, 1); cache.get(1); cache.put(3, 1); cache.put(4, 1)`, what should `cache.get(1)` return?
-- ` 101.4s` **prediction**: `1` (what a correct version returns)
-- ` 101.4s` **reveal**: revealed: predicted 1 vs value -1
-> You expected `1`. The code returns `-1`. Your prediction fits the spec and the code's answer doesn't: that gap is the bug.
+- `  70.7s` **learner adds**: get(key) returns the value most recently put for key, or -1 if it was never put or was evicted; a get counts as a use, so the evicted key is always the one least recently put or read.
+- `  70.7s` **progress**: Reading the LRUCache class and proposing properties
+- `  70.7s` **progress**: Proposed 4 properties
+- `  70.7s` **progress**: Writing checks for 1 edited properties
+- `  79.4s` **progress**: Writing an input generator
+- ` 102.6s` **progress**: Testing 5 properties on 200 generated call sequences each, plus 0 edge cases
+- ` 119.5s` **progress**: Found 1 distinct failure(s)
+- ` 119.5s` **progress**: Working out the root cause
+- ` 140.7s` **progress**: Root cause found and fix verified
+- ` 142.9s` **question**: After `cache = LRUCache(2); cache.put(-10, -10); cache.put(1, -10); cache.get(-10); cache.put(2, -10)`, what should `cache.get(-10)` return?
+- ` 144.7s` **prediction**: `-10` (what a correct version returns)
+- ` 144.7s` **reveal**: revealed: predicted -10 vs value -1
+> You expected `-10`. The code returns `-1`. Your prediction fits the spec and the code's answer doesn't: that gap is the bug.
 
-- ` 107.6s` **hint level 2**: The bug is in the get method.
+- ` 151.9s` **hint level 2**: The bug is in the get method.
 
-- ` 115.7s` **hint level 3**: At the step where the arrow points, the cache contains keys 1, 2, and 3, but key 1 was read earlier. What did you expect the key order to be at that moment?
+- ` 165.4s` **hint level 3**: Here's what the variables hold as it runs:
 ```
 …
-   7  self.capacity = 3, self.cache = OrderedDict({1: 1}), key = 2, value = 1
-   8  self.cache = OrderedDict({1: 1, 2: 1})
-   9  key = 1
+   7  self.capacity = 2, self.cache = OrderedDict({-10: -10}), key = 1, value = -10
+   8  self.cache = OrderedDict({-10: -10, 1: -10})
+   9  key = -10
   10  (no change)
-  11  self.cache = OrderedDict({1: 1, 2: 1}), key = 3, value = 1   ◀ goes wrong here
+  11  self.cache = OrderedDict({-10: -10, 1: -10}), key = 2, value = -10   ◀ goes wrong here
   12  (no change)
-  13  self.cache = OrderedDict({1: 1, 2: 1, 3: 1})
-      → returns [None, None, None, 1, None, None, -1]
+  13  self.cache = OrderedDict({-10: -10, 1: -10, 2: -10})
+      → returns [None, None, None, -10, None, -1]
 ```
 
 ## The fix
@@ -71,16 +72,15 @@ class LRUCache:
 +        self.cache.move_to_end(key)
          return self.cache[key]
 ```
-- ` 115.7s` **progress**: Checking your fix on 500 fresh inputs per property
-- ` 118.1s` **progress**: Verified on 100/500 fresh inputs
-- ` 118.2s` **progress**: Verified on 200/500 fresh inputs
-- ` 118.3s` **progress**: Verified on 300/500 fresh inputs
-- ` 118.3s` **progress**: Verified on 400/500 fresh inputs
-- ` 118.4s` **progress**: Verified on 500/500 fresh inputs
-- ` 132.0s` **fix**: passed (2507 inputs checked)
-> Your fix holds: every property passed on the original failing inputs and 2507 generated ones.
-- ` 132.0s` **follow-up**: After `cache = LRUCache(0); cache.put('a', 1)`, what should `cache.get('a')` return?
-- ` 132.0s` **progress**: Working out the root cause
+- ` 165.5s` **progress**: Checking your fix on 500 fresh inputs per property
+- ` 172.7s` **progress**: Verified on 100/500 fresh inputs
+- ` 172.9s` **progress**: Verified on 200/500 fresh inputs
+- ` 173.0s` **progress**: Verified on 300/500 fresh inputs
+- ` 173.1s` **progress**: Verified on 400/500 fresh inputs
+- ` 173.2s` **progress**: Verified on 500/500 fresh inputs
+- ` 184.9s` **fix**: passed (3007 inputs checked)
+> Your fix holds: every property passed on the original failing inputs and 3007 generated ones.
+- ` 184.9s` **follow-up**: What happens if the cache capacity is zero?
 
 ## Post-mortem
 ```json
@@ -89,28 +89,22 @@ class LRUCache:
   "bug_classes": [
     "missing edge case"
   ],
-  "how_to_spot": "In LRU caches, every access (read or write) must update recency; check that get() calls move_to_end() just like put() does for existing keys.",
+  "how_to_spot": "In an LRU cache, every access (get or put) must update the recency of the key; verify that both methods move the key to the most-recent position.",
   "other_edge_cases": [
-    "capacity <= 0 should either raise or behave as a no-op cache",
-    "put() on an existing key must refresh its position before updating the value",
-    "eviction should trigger only when size exceeds capacity, not when equal",
-    "concurrent get/put calls could corrupt the OrderedDict without locking"
+    "Cache capacity of zero or negative (should handle gracefully or raise an error).",
+    "Repeated puts of the same key without intervening gets (should not cause duplicate entries).",
+    "Interleaved gets and puts that test eviction order after multiple accesses.",
+    "Getting a key that was just evicted (should return -1)."
   ],
   "hint_level_reached": 3,
   "fix_attempts": 1,
-  "inputs_checked": 2507,
+  "inputs_checked": 3007,
   "cases": [
     {
-      "call": "cache = LRUCache(3); cache.put(1, 1); cache.put(2, 1); cache.get(1); cache.put(3, 1); cache.put(4, 1); cache.get(1)",
+      "call": "cache = LRUCache(2); cache.put(-10, -10); cache.put(1, -10); cache.get(-10); cache.put(2, -10); cache.get(-10)",
       "bug_class": "missing edge case",
       "hint_level": 3
     }
   ]
 }
 ```
-
-## The follow-up breaks it again
-- ` 132.0s` **question**: After `cache = LRUCache(0); cache.put('a', 1)`, what should `cache.get('a')` return?
-- ` 132.2s` **prediction**: `-1` (what a correct version returns)
-- ` 132.2s` **reveal**: matches_code: predicted -1 vs value -1
-> That's exactly what the code does: it returns `-1`. But does that fit your spec? Check it against: "The LRUCache constructor returns None and the capacity is a positive integer".

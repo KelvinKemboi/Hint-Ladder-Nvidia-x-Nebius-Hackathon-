@@ -5,9 +5,9 @@ Responses are built field by field from the Session, so server-only data
 """
 
 import asyncio
+import threading
 from collections.abc import Iterator
 from contextlib import contextmanager
-from functools import lru_cache
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException, WebSocket
@@ -32,9 +32,18 @@ from sparring_partner.session import (
 router = APIRouter(prefix="/api/sessions", tags=["sessions"])
 
 
-@lru_cache
+_orchestrator: Orchestrator | None = None
+_orchestrator_lock = threading.Lock()
+
+
 def get_orchestrator() -> Orchestrator:
-    return Orchestrator(SessionStore(), get_llm(), get_sandbox())
+    # FastAPI runs sync dependencies in a thread pool, and lru_cache doesn't stop
+    # concurrent first requests each building one, each with its own session store.
+    global _orchestrator
+    with _orchestrator_lock:
+        if _orchestrator is None:
+            _orchestrator = Orchestrator(SessionStore(), get_llm(), get_sandbox())
+        return _orchestrator
 
 
 OrchestratorDep = Annotated[Orchestrator, Depends(get_orchestrator)]

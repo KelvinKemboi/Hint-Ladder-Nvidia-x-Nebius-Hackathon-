@@ -329,3 +329,18 @@ def test_a_wrong_model_id_is_a_503_that_says_what_to_fix(make_client):
 
     assert response.status_code == 503
     assert "MODEL_FAST" in response.json()["detail"]
+
+
+def test_concurrent_first_requests_share_one_orchestrator(monkeypatch):
+    # Regression: three demos started at once on a fresh server got three session
+    # stores, so two of them 404'd on their own session.
+    from concurrent.futures import ThreadPoolExecutor
+
+    from sparring_partner.api import sessions
+
+    monkeypatch.setattr(sessions, "_orchestrator", None)
+    monkeypatch.setattr(sessions, "get_sandbox", lambda: time.sleep(0.05))
+    monkeypatch.setattr(sessions, "get_llm", lambda: None)
+    with ThreadPoolExecutor(8) as pool:
+        made = list(pool.map(lambda _: sessions.get_orchestrator(), range(8)))
+    assert len({id(o) for o in made}) == 1

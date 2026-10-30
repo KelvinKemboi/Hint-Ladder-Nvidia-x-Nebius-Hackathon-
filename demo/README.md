@@ -4,9 +4,9 @@ Three bugs, each run end to end: Sparring Partner finds the bug and shrinks it, 
 predicts, climbs the hint ladder to the level 3 trace, fixes it, and the fix is checked on
 hundreds of fresh inputs.
 
-Each `transcripts/*.md` file is a recording of one real run with the Token Factory models and
-the Docker sandbox. Model output varies from run to run, so wording, timings and a few
-details will differ. To record a new run against a running backend:
+Each `transcripts/*.md` file is a recording of one real run, with the Token Factory models
+writing the properties and hints and the Token Factory sandbox running the code. Model output
+varies from run to run, so wording, timings and a few details will differ. To record a new run against a running backend:
 
 ```bash
 cd backend
@@ -59,9 +59,9 @@ the range never shrinks.
 
 | What to show | What the recorded run did |
 |---|---|
-| The timeout is handled and shown as a symptom, not a crash | The question is about `binary_search([5], 6)`. The reveal shows "you predicted `-1`" against "**never finishes**: still running after 1.0s". The hunt finished normally in about 9 s. |
+| The timeout is handled and shown as a symptom, not a crash | The question is about `binary_search([5], 6)`. The reveal shows "you predicted `-1`" against "**never finishes**: still running after 1.0s". The hunt finished normally in about 13 s. |
 | Level 3 trace | `nums = [5], target = 6, lo = 0, hi = 0`, then `mid = 0`, then rows with no change. The hint asks what identical values mean for the loop. |
-| The fix | `lo = mid + 1` passed, with 2,529 inputs checked. Follow-up: "What if the input list is not sorted?" |
+| The fix | `lo = mid + 1` passed, with 3,029 inputs checked. Follow-up: "What if the input list is not sorted?" |
 
 **How hangs are handled:**
 - **Each call is stopped after `EXPLORE_CALL_TIMEOUT_S` (1 s).**
@@ -92,9 +92,9 @@ just read can still be evicted.
 
 | What to show | What the recorded run did |
 |---|---|
-| Shrunk operation sequence | The model's strategy drew a capacity of 3, so the shortest sequence had one more `put`: "After `cache = LRUCache(3); cache.put(1, 1); cache.put(2, 1); cache.get(1); cache.put(3, 1); cache.put(4, 1)`, what should `cache.get(1)` return?" It returned `-1`; a correct cache returns `1`. |
-| Level 3 trace | Shows the object's state (`self.cache = OrderedDict({1: 1, 2: 1})`) and marks the step after `get(1)`, where 1 should have moved to the end. |
-| The fix | Adding `self.cache.move_to_end(key)` passed, with 2,507 inputs checked. |
+| Shrunk operation sequence | The issue's sequence, with the model strategy's keys: "After `cache = LRUCache(2); cache.put(-10, -10); cache.put(1, -10); cache.get(-10); cache.put(2, -10)`, what should `cache.get(-10)` return?" It returned `-1`; a correct cache returns `-10`. Renumbering keeps the values the strategy drew, so here they start at its lower bound, -10, rather than 1. |
+| Level 3 trace | Shows the object's state (`self.cache = OrderedDict({-10: -10, 1: -10})`) and marks the `put(2, …)` right after `get(-10)`, which evicts -10 because the get didn't move it to the end. |
+| The fix | Adding `self.cache.move_to_end(key)` passed, with 3,007 inputs checked. |
 
 **Notes:**
 - **The learner adds the recency rule at review.** The models don't always propose

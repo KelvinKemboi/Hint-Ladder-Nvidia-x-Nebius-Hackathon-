@@ -54,8 +54,11 @@ uv run python scripts/build_sandbox_image.py
 uv run python scripts/build_sandbox_image.py --check
 ```
 
-For local development without sandbox access, set `SANDBOX_BACKEND=local`. That runs code in an
-unisolated subprocess on your machine (and macOS ignores the memory limit), so only use it with code you trust.
+Without sandbox access, set `SANDBOX_BACKEND=docker` to use an isolated local container
+instead (no network, read-only, capped memory, CPU and processes). Build its image with
+`build_sandbox_image.py --docker`. `SANDBOX_BACKEND=local` runs code in an unisolated
+subprocess on your machine (and macOS ignores the memory limit), so only use it in development,
+with code you trust.
 
 **Checks** (the same ones CI runs):
 
