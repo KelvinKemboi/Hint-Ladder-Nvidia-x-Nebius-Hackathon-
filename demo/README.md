@@ -33,7 +33,7 @@ says "current starts *before* last ends", and `<` is what that comment literally
 | `[[1, 4], [4, 5]]` is found and shrunk | First question: "What should `merge_intervals([[1, 4], [4, 5]])` return?" Hypothesis shrinks its own find to an equally small two-interval input, and the hand-picked "touching ranges" edge case wins the tie because it's easier to read. |
 | Level 3 trace shows the comparison at the touching intervals | Rows show `current = [4, 5]` and `last = [1, 4]`. The marked row is where `[4, 5]` is appended instead of merged. |
 | The `<=` fix passes 500 fresh inputs | Passed, with 3,516 inputs checked: 500 fresh inputs per property, plus the edge cases and nearby variants. |
-| The follow-up breaks it again | Follow-up: `merge_intervals([[5, 6], [1, 3], [2, 4]])`. The fixed code returns `[[5, 6]]` and loses two intervals. |
+| The follow-up breaks it again | Follow-up: `merge_intervals([[5, 7], [1, 3], [2, 6]])`. The fixed code returns `[[5, 7]]` and loses two intervals. |
 
 **Notes for the presenter:**
 - **The learner adds two properties at review.** One is "touching intervals merge"; the

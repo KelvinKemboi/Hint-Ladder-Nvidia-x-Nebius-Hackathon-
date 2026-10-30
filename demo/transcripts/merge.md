@@ -20,29 +20,31 @@ def merge_intervals(intervals):
 ```
 
 ## Properties
-- `  52.8s` **proposed**: 2 properties for `merge_intervals`
-  - Output intervals never overlap (they are pairwise disjoint).
-  - Output intervals are sorted by their start values.
+- `  65.7s` **proposed**: 4 properties for `merge_intervals`
+  - Output intervals are sorted by start and are pairwise disjoint (no overlap, even at endpoints).
+  - The first output interval starts at the minimum start among all input intervals.
+  - The last output interval ends at the maximum end among all input intervals.
+  - Every output interval's start equals the start of some input interval, and every output interval's end equals the end of some input interval.
 
 ## The hunt
-- `  52.8s` **learner adds**: No two output intervals overlap or touch: [1, 4] and [4, 5] merge into [1, 5].
-- `  52.8s` **learner adds**: Every point covered by an input interval is covered by an output interval, and no other point is.
-- `  52.8s` **progress**: Reading merge_intervals() and proposing properties
-- `  52.8s` **progress**: Proposed 2 properties
-- `  52.8s` **progress**: Writing checks for 2 edited properties
-- `  79.1s` **progress**: Writing an input generator
-- ` 118.3s` **progress**: Testing 4 properties on 200 generated inputs each, plus 9 edge cases
-- ` 120.9s` **progress**: Found 1 distinct failure(s)
-- ` 120.9s` **progress**: Working out the root cause
-- ` 128.5s` **progress**: Root cause found and fix verified
-- ` 129.4s` **question**: What should `merge_intervals([[1, 4], [4, 5]])` return?
-- ` 131.2s` **prediction**: `[[1, 5]]` (what a correct version returns)
-- ` 131.2s` **reveal**: revealed: predicted [[1, 5]] vs value [[1, 4], [4, 5]]
+- `  65.7s` **learner adds**: No two output intervals overlap or touch: [1, 4] and [4, 5] merge into [1, 5].
+- `  65.7s` **learner adds**: Every point covered by an input interval is covered by an output interval, and no other point is.
+- `  65.8s` **progress**: Reading merge_intervals() and proposing properties
+- `  65.8s` **progress**: Proposed 4 properties
+- `  65.8s` **progress**: Writing checks for 2 edited properties
+- ` 140.1s` **progress**: Writing an input generator
+- ` 320.9s` **progress**: Testing 6 properties on 200 generated inputs each, plus 9 edge cases
+- ` 323.5s` **progress**: Found 1 distinct failure(s)
+- ` 323.5s` **progress**: Working out the root cause
+- ` 336.8s` **progress**: Root cause found and fix verified
+- ` 337.3s` **question**: What should `merge_intervals([[1, 4], [4, 5]])` return?
+- ` 338.9s` **prediction**: `[[1, 5]]` (what a correct version returns)
+- ` 338.9s` **reveal**: revealed: predicted [[1, 5]] vs value [[1, 4], [4, 5]]
 > You expected `[[1, 5]]`. The code returns `[[1, 4], [4, 5]]`. Your prediction fits the spec and the code's answer doesn't: that gap is the bug.
 
-- ` 139.5s` **hint level 2**: The problem is in the merge_intervals function, within the loop that processes each interval. Examine how the code decides if the current interval should be merged with the last one. What does that decision currently require?
+- ` 351.5s` **hint level 2**: The bug is in the loop body where you decide whether to merge or append the current interval.
 
-- ` 146.6s` **hint level 3**: Look at the row marked ◀ where the merged list becomes [[1, 4], [4, 5]]; what did you expect the values of `last` and `current` to be at that point?
+- ` 367.5s` **hint level 3**: Here's what the variables hold while `merge_intervals([[1, 4], [4, 5]])` runs. Look at the row marked ◀.
 ```
 …
    3  intervals = [[1, 4], [4, 5]], merged = [[1, 4]]
@@ -62,15 +64,16 @@ def merge_intervals(intervals):
 +        if current[0] <= last[1]:  # overlap: current starts before last ends
              merged[-1][1] = max(last[1], current[1])  # merge by extending end time
 ```
-- ` 146.6s` **progress**: Checking your fix on 500 fresh inputs per property
-- ` 148.7s` **progress**: Verified on 100/500 fresh inputs
-- ` 149.5s` **progress**: Verified on 200/500 fresh inputs
-- ` 149.5s` **progress**: Verified on 300/500 fresh inputs
-- ` 149.6s` **progress**: Verified on 400/500 fresh inputs
-- ` 149.6s` **progress**: Verified on 500/500 fresh inputs
-- ` 161.4s` **fix**: passed (2516 inputs checked)
-> Your fix holds: every property passed on the original failing inputs and 2516 generated ones.
-- ` 161.4s` **follow-up**: What if the input intervals are tuples instead of lists?
+- ` 367.5s` **progress**: Checking your fix on 500 fresh inputs per property
+- ` 369.7s` **progress**: Verified on 100/500 fresh inputs
+- ` 370.4s` **progress**: Verified on 200/500 fresh inputs
+- ` 370.4s` **progress**: Verified on 300/500 fresh inputs
+- ` 370.5s` **progress**: Verified on 400/500 fresh inputs
+- ` 370.7s` **progress**: Verified on 500/500 fresh inputs
+- ` 379.8s` **fix**: passed (3516 inputs checked)
+> Your fix holds: every property passed on the original failing inputs and 3516 generated ones.
+- ` 379.8s` **follow-up**: What should `merge_intervals([[5, 7], [1, 3], [2, 6]])` return?
+- ` 379.8s` **progress**: Working out the root cause
 
 ## Post-mortem
 ```json
@@ -79,16 +82,16 @@ def merge_intervals(intervals):
   "bug_classes": [
     "boundary condition"
   ],
-  "how_to_spot": "Check whether intervals or ranges are defined as inclusive [start, end] or half-open [start, end); if inclusive, adjacent intervals sharing an endpoint (e.g., [1,4] and [4,5]) must be treated as overlapping, so use <= instead of <.",
+  "how_to_spot": "Check whether intervals are open or closed at endpoints; test cases where intervals touch exactly (e.g., [1,4] and [4,5]) to catch off-by-one overlaps.",
   "other_edge_cases": [
-    "Empty input list",
     "Single interval input",
-    "Intervals completely contained within another (e.g., [1,10], [3,5])",
-    "Unsorted input (though spec says sorted, defensive checks help)"
+    "All intervals overlapping into one",
+    "Intervals completely contained within others",
+    "Empty input list"
   ],
   "hint_level_reached": 3,
   "fix_attempts": 1,
-  "inputs_checked": 2516,
+  "inputs_checked": 3516,
   "cases": [
     {
       "call": "merge_intervals([[1, 4], [4, 5]])",
@@ -98,3 +101,9 @@ def merge_intervals(intervals):
   ]
 }
 ```
+
+## The follow-up breaks it again
+- ` 379.8s` **question**: What should `merge_intervals([[5, 7], [1, 3], [2, 6]])` return?
+- ` 381.9s` **prediction**: `[[1, 7]]` (what a correct version returns)
+- ` 381.9s` **reveal**: revealed: predicted [[1, 7]] vs value [[5, 7]]
+> You expected `[[1, 7]]`. The code returns `[[5, 7]]`. Your prediction fits the spec and the code's answer doesn't: that gap is the bug.
