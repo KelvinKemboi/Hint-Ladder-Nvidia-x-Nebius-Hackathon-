@@ -38,6 +38,13 @@ what the failing call should return, climb the hint meter if you need to, and su
 the editor. For demos, set `EXPOSE_GATE_LOG=true` to show the **Gate log** drawer: every message
 the gate blocked, and why.
 
+**What it can test**: a Python function, or a class. A class is tested as a state machine with
+Hypothesis's `RuleBasedStateMachine`: it is created, its public methods are called in random
+order, and the properties are checked after every call; a failure shrinks to the shortest call
+sequence, like `cache = LRUCache(2); cache.put(1, 1); cache.put(2, 1); cache.get(1);
+cache.put(3, 1); cache.get(1)`. Code that never finishes (an infinite loop) is stopped after
+`EXPLORE_CALL_TIMEOUT_S` and shown as a symptom to predict, not an error.
+
 **Sandbox**: user code only ever runs in the Token Factory sandbox (beta; [request access](https://tokenfactory.nebius.com/sandboxes/about)).
 Set `NEBIUS_PROJECT_ID`, then build the image once (Python 3.12 + Hypothesis) and smoke-test it:
 
@@ -62,6 +69,7 @@ cd frontend && npm run build
 ```
 backend/    FastAPI app (src/sparring_partner), tests
 frontend/   React + Vite web UI
+demo/       The three demo bugs, their walkthrough and recorded runs
 docs/       Project outline
 scripts/    GitHub issue setup
 ```
@@ -69,6 +77,8 @@ scripts/    GitHub issue setup
 ## Docs
 
 - [Project outline](docs/PROJECT_OUTLINE.md): pitch, architecture, the hint gate, scope and milestones
+- [Demo walkthrough](demo/README.md): three bugs end to end, with transcripts of real runs
+  (`backend/scripts/run_demo.py` records new ones)
 - [`scripts/create_github_issues.sh`](scripts/create_github_issues.sh): creates the labels, milestones and issues on GitHub (`DRY_RUN=1` to preview)
 
 ## License

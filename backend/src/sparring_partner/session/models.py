@@ -91,6 +91,9 @@ class Session:
     created_at: float = field(default_factory=time.time)
 
     params: list[ParamSpec] = field(default_factory=list)
+    # For a class: arguments per call ("__init__" and each public method). Empty for a
+    # function. A class is tested through operation sequences (testing.capture).
+    methods: dict[str, int] = field(default_factory=dict)
     example_args: tuple[Any, ...] | None = None  # a trivial input, for validating predicates
     properties: list[PropertySpec] = field(default_factory=list)
 
@@ -123,6 +126,10 @@ class Session:
         if level > MAX_HINT_LEVEL:
             raise ValueError(f"hint level is at most {MAX_HINT_LEVEL}")
         self._hint_level = level
+
+    @property
+    def stateful(self) -> bool:
+        return bool(self.methods)
 
     def reset_ladder(self) -> None:
         """A new failing case starts a new hint ladder: levels only rise within a case."""

@@ -13,7 +13,7 @@ from pydantic import BaseModel, Field
 from sparring_partner.agents import tracer
 from sparring_partner.agents.diagnosis import Diagnoser
 from sparring_partner.agents.gate import LEVEL_ALLOWS, NEVER, HintGate
-from sparring_partner.agents.predict import current_case, describe_actual
+from sparring_partner.agents.predict import case_outcome, current_case, describe_actual
 from sparring_partner.agents.testgen import JsonLLM
 from sparring_partner.llm import Message
 from sparring_partner.session import Session
@@ -150,7 +150,7 @@ class HintWriter:
             f"Intent: {session.intent}\nThe learner's spec:\n"
             + "\n".join(f"- {p.statement}" for p in session.properties)
             + f"\n\nCode:\n{numbered}\n\n"
-            f"Failing case: `{ce['call']}` {_actual(ce)}; breaks: "
+            f"Failing case: `{ce['call']}` {_actual(session, ce)}; breaks: "
             f"{'; '.join(ce['violated_properties'])}\n\n"
             f"What you know (SECRET):\n- root cause: {d.root_cause}\n- region: {d.region}\n"
             f"- concept: {d.concept}\n- bug line: {d.line}\n- fix:\n{d.reference_fix}\n\n"
@@ -167,7 +167,10 @@ def fallback_hint(session: Session, level: int, evidence: dict[str, Any] | None)
     ce = current_case(session)
     broken = ce["violated_properties"][0]
     if level == 1:
-        return f'Try `{ce["call"]}`. It {_actual(ce)}, but your spec says: "{broken.rstrip(".")}".'
+        return (
+            f"Try `{ce['call']}`. It {_actual(session, ce)}, but your spec says: "
+            f'"{broken.rstrip(".")}".'
+        )
     if level == 2:
         return f"The problem is inside {d.region}."
     if level == 3:
@@ -186,7 +189,7 @@ def generic_hint(session: Session, level: int, evidence: dict[str, Any] | None) 
     ce = current_case(session)
     return {
         1: f"Try `{ce['call']}` and compare the result with your spec.",
-        2: f"The problem is inside {session.function}().",
+        2: f"The problem is inside {_target(session)}.",
         3: "Here's what the variables hold as it runs:\n\n" + _table(evidence, level),
         4: "Re-read your spec and ask which rule the failing input breaks.",
         5: f"Look at line {session.diagnosis.line if session.diagnosis else '?'}.",
@@ -205,10 +208,13 @@ def _table(evidence: dict[str, Any] | None, level: int) -> str:
     return tracer.render(evidence, show_lines=level >= 5)
 
 
-def _actual(ce: dict[str, Any]) -> str:
-    if ce["exception_type"]:
-        return describe_actual({"error": f"{ce['exception_type']}: {ce['exception_message']}"})
-    return describe_actual({"error": None, "output": ce["output"]})
+def _actual(session: Session, ce: dict[str, Any]) -> str:
+    """'returns `-1`'; for a class, what its last call returns."""
+    return describe_actual(case_outcome(session, ce))
+
+
+def _target(session: Session) -> str:
+    return f"the {session.function} class" if session.stateful else f"{session.function}()"
 
 
 def _line_text(session: Session, line: int | None) -> str:

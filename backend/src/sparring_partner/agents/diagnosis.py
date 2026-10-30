@@ -12,7 +12,7 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
-from sparring_partner.agents.code_info import find_functions
+from sparring_partner.agents.code_info import defined_names
 from sparring_partner.agents.testgen import (
     CONVENTIONS,
     EdgeCase,
@@ -55,11 +55,13 @@ class Diagnoser:
         *,
         max_examples: int = 200,
         call_timeout_s: float = 1.0,
+        budget_s: float | None = None,
     ):
         self.llm = llm
         self.sandbox = sandbox
         self.max_examples = max_examples
         self.call_timeout_s = call_timeout_s
+        self.budget_s = budget_s
 
     async def trace(self, session: Session, code: str | None = None) -> dict[str, Any] | None:
         """Line-by-line locals for the top counterexample, recorded in the sandbox.
@@ -133,11 +135,11 @@ class Diagnoser:
         if not 1 <= draft.line <= lines:
             problems.append(f"line must be between 1 and {lines} (the original code's lines)")
         try:
-            functions = {fn.name for fn in find_functions(fix)}
+            names = defined_names(fix)
         except SyntaxError as exc:
             return [*problems, f"reference_fix has a SyntaxError on line {exc.lineno}: {exc.msg}"]
-        if session.function not in functions:
-            problems.append(f"reference_fix must still define {session.function}()")
+        if session.function not in names:
+            problems.append(f"reference_fix must still define {session.function}")
         if _normalized(fix) == _normalized(session.code):
             problems.append("reference_fix is identical to the original code")
         return problems
@@ -156,6 +158,7 @@ class Diagnoser:
             max_examples=self.max_examples,
             call_timeout_s=self.call_timeout_s,
             seed=0,
+            budget_s=self.budget_s,
         )
         result = await self.sandbox.run(fix, harness)
         if result.timed_out:
@@ -185,10 +188,22 @@ class Diagnoser:
             f"Trace of the failing case (locals before each line runs):\n"
             f"{render_trace(session.trace)}\n\n"
             "Diagnose the root cause of the failing case. reference_fix is the COMPLETE "
-            "corrected code: change as little as possible, keep the function name and "
-            "signature, and make every property hold on every input, fixing all failures "
-            f"above. {CONVENTIONS}"
+            "corrected code: change as little as possible, keep the "
+            + (
+                "class name and method signatures"
+                if session.stateful
+                else "function name and signature"
+            )
+            + ", and make every property hold on every input, fixing all failures "
+            f"above. {CONVENTIONS}" + (STATEFUL_NOTE if session.stateful else "")
         )
+
+
+STATEFUL_NOTE = (
+    "\nThis is a class, tested as a sequence of calls on one object: each failing case "
+    "lists the calls, and 'returns' is the list of what each call returned, in order "
+    "(None for the constructor)."
+)
 
 
 def counterexample_args(ce: dict[str, Any]) -> tuple[Any, ...]:
@@ -212,7 +227,10 @@ def render_trace(trace: dict[str, Any] | None, max_steps: int = MAX_TRACE_STEPS)
 
 
 def _describe(ce: dict[str, Any]) -> str:
-    if ce["exception_type"]:
+    if ce.get("timed_out"):
+        line = f" (interrupted on line {ce['exception_line']})" if ce["exception_line"] else ""
+        outcome = f"never finishes: {ce['exception_message']}{line}"
+    elif ce["exception_type"]:
         line = f" on line {ce['exception_line']}" if ce["exception_line"] else ""
         outcome = f"raises {ce['exception_type']}: {ce['exception_message']}{line}"
     else:

@@ -26,8 +26,9 @@ function Side({ title, value, pieces }: { title: string; value: ShownValue; piec
   return (
     <div className="side">
       <span className="side-title">{title}</span>
-      <pre className={value.kind === "error" ? "is-error" : ""}>
+      <pre className={value.kind === "value" ? "" : "is-error"}>
         {value.kind === "error" && <span className="err-tag">raises </span>}
+        {value.kind === "timeout" && <span className="err-tag">never finishes: </span>}
         {pieces.map((p, i) =>
           p.changed ? (
             <mark key={i}>{p.text}</mark>

@@ -8,7 +8,7 @@ from sparring_partner.config import get_settings
 
 ALLOW = {"allow": True, "reason": "fine"}
 DENY = {"allow": False, "reason": "names the operator to use"}
-TOUCHING_CALL = "merge_intervals([[0, 0], [0, 0]])"
+TOUCHING_CALL = "merge_intervals([[1, 4], [4, 5]])"
 GOOD_HINTS = {
     1: "Try that input again: it returns two separate intervals. Which part of your spec breaks?",
     2: "Look inside the for loop in merge_intervals.",
@@ -48,14 +48,14 @@ def test_question_names_the_simplest_failing_call(make_client):
     assert [m["kind"] for m in messages] == ["question"]
 
 
-@pytest.mark.parametrize("answer", ["[[0, 0]]", "it should return [(0, 0)].", "`[[0,0]]`"])
+@pytest.mark.parametrize("answer", ["[[1, 5]]", "it should return [(1, 5)].", "`[[1,5]]`"])
 def test_correct_prediction_reveals_the_bug(make_client, answer):
     client, _, sid, _ = predicting(make_client)
 
     result = client.post(f"/api/sessions/{sid}/prediction", json={"answer": answer}).json()
 
     assert result["outcome"] == "revealed"
-    assert result["actual"] == "returns `[[0, 0], [0, 0]]`"
+    assert result["actual"] == "returns `[[1, 4], [4, 5]]`"
     assert "that gap is the bug" in result["message"]
     assert result["state"] == "hinting" and result["hint_level"] == 1
 
@@ -63,10 +63,10 @@ def test_correct_prediction_reveals_the_bug(make_client, answer):
 def test_the_reveal_carries_both_values_for_side_by_side_display(make_client):
     client, _, sid, _ = predicting(make_client)
 
-    result = client.post(f"/api/sessions/{sid}/prediction", json={"answer": "[(0, 0)]"}).json()
+    result = client.post(f"/api/sessions/{sid}/prediction", json={"answer": "[(1, 5)]"}).json()
 
-    assert result["predicted"] == {"kind": "value", "text": "[(0, 0)]"}
-    assert result["returned"] == {"kind": "value", "text": "[[0, 0], [0, 0]]"}
+    assert result["predicted"] == {"kind": "value", "text": "[(1, 5)]"}
+    assert result["returned"] == {"kind": "value", "text": "[[1, 4], [4, 5]]"}
     [reveal] = [m for m in client.get(f"/api/sessions/{sid}").json()["messages"] if m["data"]]
     assert reveal["kind"] == "reveal"
     assert reveal["data"] == {
@@ -81,13 +81,13 @@ def test_predicting_what_the_buggy_code_does_gets_a_nudge_to_the_spec(make_clien
     client, _, sid, _ = predicting(make_client)
 
     result = client.post(
-        f"/api/sessions/{sid}/prediction", json={"answer": "[[0, 0], [0, 0]]"}
+        f"/api/sessions/{sid}/prediction", json={"answer": "[[1, 4], [4, 5]]"}
     ).json()
 
     assert result["outcome"] == "matches_code"
     assert f'Check it against: "{NO_OVERLAP[0]}"' in result["message"]
     assert result["state"] == "predicting"  # they can try again
-    assert "[[0, 0]]`" not in result["message"].replace(result["actual"], "")  # no answer given
+    assert "[[1, 5]]`" not in result["message"].replace(result["actual"], "")  # no answer given
 
 
 def test_wrong_in_a_different_way_gets_the_output_and_a_nudge(make_client):
@@ -96,7 +96,7 @@ def test_wrong_in_a_different_way_gets_the_output_and_a_nudge(make_client):
     result = client.post(f"/api/sessions/{sid}/prediction", json={"answer": "[]"}).json()
 
     assert result["outcome"] == "both_differ"
-    assert result["message"].startswith("The code returns `[[0, 0], [0, 0]]`.")
+    assert result["message"].startswith("The code returns `[[1, 4], [4, 5]]`.")
     assert COVERED[0] in result["message"]
     assert result["state"] == "predicting"
 
@@ -151,7 +151,7 @@ def test_level_3_hint_carries_the_trace_table_without_line_numbers(make_client):
     table = hints[2]["table"]
     assert sum(row["marked"] for row in table["rows"]) == 1
     assert all(set(row) == {"step", "vars", "marked"} for row in table["rows"])
-    assert table["output"] == "[[0, 0], [0, 0]]"
+    assert table["output"] == "[[1, 4], [4, 5]]"
     stored = client.get(f"/api/sessions/{sid}").json()["messages"][-1]
     assert stored["data"] == {"prose": hints[2]["prose"], "table": table}
 
@@ -173,7 +173,7 @@ def test_blocked_drafts_are_retried_with_the_reason_then_fall_back(make_client):
     text = hint(client, sid).json()["text"]
 
     assert text == (
-        f"Try `{TOUCHING_CALL}`. It returns `[[0, 0], [0, 0]]`, "
+        f"Try `{TOUCHING_CALL}`. It returns `[[1, 4], [4, 5]]`, "
         f'but your spec says: "{NO_OVERLAP[0]}".'
     )
     retries = [m[-1]["content"] for m in llm.asked("HintDraft")[1:]]
@@ -211,7 +211,7 @@ def test_nothing_leaks_beyond_the_level_reached(make_client):
         make_client, HintDraft=drafts, GateVerdict=[ALLOW] * 3
     )
     client.get(f"/api/sessions/{sid}/prediction")
-    client.post(f"/api/sessions/{sid}/prediction", json={"answer": "[[0, 0]]"})
+    client.post(f"/api/sessions/{sid}/prediction", json={"answer": "[[1, 5]]"})
     for _ in range(3):
         hint(client, sid)
 

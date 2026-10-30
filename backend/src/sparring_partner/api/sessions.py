@@ -89,7 +89,7 @@ class PredictionIn(BaseModel):
 
 
 class ShownValue(BaseModel):
-    kind: str  # "value" or "error"
+    kind: str  # "value", "error", or "timeout" (still running when stopped)
     text: str  # a repr, or the error
 
 

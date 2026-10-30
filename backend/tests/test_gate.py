@@ -119,6 +119,12 @@ def test_code_snippets():
     assert code_snippets(text) == ["x <= y", "if a:\n    b()"]
 
 
+def test_plain_values_are_not_code():
+    # Splicing `-1` over a line deletes it, which can "fix" a case by accident
+    text = "It returns `-1`, not `[[1, 5]]` or `(None, 'a')`; compare `x[-1]`."
+    assert code_snippets(text) == ["x[-1]"]
+
+
 def test_splice_variants():
     variants = splice_variants(MERGE_CODE, "if start <= merged[-1][1]:", "merge_intervals")
     assert HALF_FIXED_MERGE in variants  # replacing line 7

@@ -25,8 +25,15 @@ from sparring_partner.testing.capture import (
     _record,
     _time_limit,
     find_counterexamples,
+    resolve_target,
+    user_file,
 )
 from sparring_partner.testing.counterexamples import Property
+
+
+def _target(solution: Any, config: dict[str, Any]) -> Callable[..., Any]:
+    """The function under test, or for a class, its operation runner (see capture)."""
+    return resolve_target(getattr(solution, config["function"]))
 
 
 def load_predicate(source: str) -> Callable[[tuple[Any, ...], Any], Any]:
@@ -46,7 +53,7 @@ def check_predicates(solution: Any, config: dict[str, Any]) -> dict[str, Any]:
     Returning False there is fine: the user's code may well be wrong. It is also
     broken if it rejects a worked example's known-correct output.
     """
-    fn = getattr(solution, config["function"])
+    fn = _target(solution, config)
     errors: dict[str, str] = {}
     for name, source in config["predicates"].items():
         try:
@@ -92,6 +99,10 @@ def _rejects_correct_output(check: Callable[..., Any], config: dict[str, Any]) -
     return None
 
 
+def _is_op(value: Any) -> bool:
+    return isinstance(value, list) and len(value) >= 1 and isinstance(value[0], str)
+
+
 def _is_int(value: Any) -> bool:
     return isinstance(value, int) and not isinstance(value, bool)
 
@@ -117,6 +128,12 @@ KIND_CHECKS: dict[str, Callable[[Any], bool]] = {
     ),
     "list_str": lambda x: isinstance(x, list) and all(isinstance(v, str) for v in x),
     "intervals": lambda x: isinstance(x, list) and all(_is_interval(v) for v in x),
+    "sorted_intervals": lambda x: (
+        isinstance(x, list)
+        and all(_is_interval(v) for v in x)
+        and [v[0] for v in x] == sorted(v[0] for v in x)
+    ),
+    "operations": lambda x: isinstance(x, list) and len(x) >= 1 and all(_is_op(v) for v in x),
     "dict_str_int": lambda x: (
         isinstance(x, dict) and all(isinstance(k, str) and _is_int(v) for k, v in x.items())
     ),
@@ -161,11 +178,32 @@ def check_strategy(
     return []
 
 
+def check_method_strategies(
+    strategy_fn: Callable[[], Any], methods: dict[str, int], n: int = 20
+) -> list[str]:
+    """Problems with a class's strategies: `strategy()` must return a dict with an
+    argument-tuple strategy for "__init__" and for each method, of the right arity."""
+    try:
+        strategies = strategy_fn()
+    except Exception as exc:
+        return [f"strategy() raised {type(exc).__name__}: {exc}"]
+    if not isinstance(strategies, dict):
+        return [f"strategy() must return a dict of strategies, got {type(strategies).__name__}"]
+    if missing := [m for m in methods if m not in strategies]:
+        return [f"strategy() must have a key for {', '.join(map(repr, missing))}"]
+    if extra := [m for m in strategies if m not in methods]:
+        return [f"there are no methods named {', '.join(map(repr, extra))}"]
+    for name, arity in methods.items():
+        if problems := check_strategy(lambda name=name: strategies[name], arity, n):
+            return [f"{name!r}: {problems[0]}"]
+    return []
+
+
 def explore(
     solution: Any, config: dict[str, Any], strategy_fn: Callable[[], Any]
 ) -> dict[str, Any]:
     """Hunt for bugs: Hypothesis per property plus the hand-picked edge cases."""
-    fn = getattr(solution, config["function"])
+    fn = _target(solution, config)
     properties, property_errors = [], {}
     for name, source in config["predicates"].items():
         try:
@@ -181,9 +219,12 @@ def explore(
         random_seed=config.get("seed"),
         call_timeout_s=config.get("call_timeout_s"),
         examples=config["edge_cases"],
+        budget_s=config.get("budget_s"),
+        report=(report := {}),
     )
     return {
         "counterexamples": [ce.to_dict() for ce in found],
+        "out_of_time": report["out_of_time"],
         "property_errors": property_errors,
         "edge_cases": len(config["edge_cases"]),
         "max_examples": config["max_examples"],
@@ -195,8 +236,8 @@ def trace_call(solution: Any, config: dict[str, Any]) -> dict[str, Any]:
 
     Each step is the state *before* that line runs. Values are short reprs.
     """
-    fn = getattr(solution, config["function"])
-    filename = fn.__code__.co_filename
+    fn = _target(solution, config)
+    filename = user_file(fn)
     max_steps = config.get("max_steps", 200)
     steps: list[dict[str, Any]] = []
 
@@ -206,7 +247,7 @@ def trace_call(solution: Any, config: dict[str, Any]) -> dict[str, Any]:
                 {
                     "line": frame.f_lineno,
                     "function": frame.f_code.co_name,
-                    "locals": {k: _short(v) for k, v in frame.f_locals.items()},
+                    "locals": _locals(frame.f_locals),
                 }
             )
         return local_trace
@@ -228,6 +269,19 @@ def trace_call(solution: Any, config: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _locals(names: dict[str, Any]) -> dict[str, str]:
+    """Short reprs; `self` as its attributes (self.size = 2), since an object's default
+    repr is just its memory address."""
+    shown = {}
+    for key, value in names.items():
+        attrs = getattr(value, "__dict__", None) if key == "self" else None
+        if isinstance(attrs, dict):
+            shown |= {f"self.{k}": _short(v) for k, v in attrs.items()}
+        else:
+            shown[key] = _short(value)
+    return shown
+
+
 def _short(value: Any, limit: int = 80) -> str:
     text = repr(value)
     return text if len(text) <= limit else text[: limit - 3] + "..."
@@ -239,7 +293,8 @@ def evaluate_prediction(solution: Any, config: dict[str, Any]) -> dict[str, Any]
     name = config["function"]
     args = _as_args(config["args"])
     predicted = config["predicted"]
-    actual = _call(getattr(solution, name), args, timeout)
+    fn = _target(solution, config)
+    actual = _call(fn, args, timeout)
 
     reference = None
     if config.get("reference_fix"):
@@ -247,14 +302,22 @@ def evaluate_prediction(solution: Any, config: dict[str, Any]) -> dict[str, Any]
         if reference_fn is not None:
             reference = _call(reference_fn, args, timeout)
 
+    # For a class the prediction is what the last call returns; the properties see
+    # it in place of that call's result.
+    as_output = predicted["value"]
+    if stateful := hasattr(fn, "target_class"):
+        before = next((o.output for o in (actual, reference) if o and o.exception is None), None)
+        as_output = None if before is None else [*before[:-1], predicted["value"]]
+        actual, reference = _last(actual), reference and _last(reference)
+
     violates = []
-    if predicted["kind"] == "value":
+    if predicted["kind"] == "value" and not (stateful and as_output is None):
         for statement, source in config["predicates"].items():
             try:
                 prop = Property(statement, load_predicate(source))
             except Exception:
                 continue
-            if _check(prop, args, predicted["value"], timeout) == "":
+            if _check(prop, args, as_output, timeout) == "":
                 violates.append(statement)
 
     return {
@@ -264,6 +327,13 @@ def evaluate_prediction(solution: Any, config: dict[str, Any]) -> dict[str, Any]
         "matches_reference": None if reference is None else _matches(predicted, reference),
         "violates": violates,
     }
+
+
+def _last(outcome: _Outcome) -> _Outcome:
+    """A class's outcome narrowed to its last call."""
+    if outcome.exception is not None or not outcome.output:
+        return outcome
+    return _Outcome(output=outcome.output[-1])
 
 
 def fixes_failure(solution: Any, config: dict[str, Any]) -> dict[str, Any]:
@@ -300,14 +370,15 @@ def _load_function(source: str, name: str, timeout: float | None) -> Any:
     except BaseException:  # a candidate may raise anything, including our timeout
         return None
     fn = namespace.get(name)
-    return fn if callable(fn) else None
+    return resolve_target(fn) if callable(fn) else None
 
 
 def _describe_outcome(outcome: _Outcome) -> dict[str, Any]:
     if outcome.exception is not None:
         exc = outcome.exception
-        return {"output": None, "error": f"{type(exc).__name__}: {exc}"}
-    return {"output": _short(outcome.output, 2000), "error": None}
+        error = f"{type(exc).__name__}: {exc}"
+        return {"output": None, "error": error, "timed_out": outcome.timed_out}
+    return {"output": _short(outcome.output, 2000), "error": None, "timed_out": False}
 
 
 def _matches(predicted: dict[str, Any], outcome: _Outcome) -> bool:
@@ -339,7 +410,7 @@ def _properties(predicates: dict[str, str]) -> list[Property]:
 
 def check_inputs(solution: Any, config: dict[str, Any]) -> dict[str, Any]:
     """Which of the given inputs break a property (or crash)? Index -> counterexample."""
-    fn = getattr(solution, config["function"])
+    fn = _target(solution, config)
     timeout = config.get("call_timeout_s")
     properties = _properties(config["predicates"])
     call = functools.partial(_call, timeout_s=timeout)
@@ -362,7 +433,7 @@ def verify_fix(
     `config["variants"]` are the counterexamples shifted slightly, to catch a fix
     that only handles the exact failing input.
     """
-    fn = getattr(solution, config["function"])
+    fn = _target(solution, config)
     timeout = config.get("call_timeout_s")
     properties = _properties(config["predicates"])
     found = find_counterexamples(
@@ -373,11 +444,14 @@ def verify_fix(
         random_seed=config["seed"],
         call_timeout_s=timeout,
         examples=config["examples"],
+        budget_s=config.get("budget_s"),
+        report=(report := {}),
     )
     variants = check_inputs(solution, {**config, "inputs": config["variants"]})["failures"]
     originals = check_inputs(solution, {**config, "inputs": config["originals"]})["failures"]
     return {
         "counterexamples": [ce.to_dict() for ce in found],
+        "out_of_time": report["out_of_time"],
         "original_failures": sorted(originals),
         "variant_failures": [variants[i] for i in sorted(variants)],
         "inputs_checked": config["max_examples"] * (len(properties) + 1)

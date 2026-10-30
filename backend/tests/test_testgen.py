@@ -7,6 +7,8 @@ from fakes import COVERED, INTERVALS_STRATEGY, MERGE_CODE, NO_OVERLAP, FakeLLM
 from sparring_partner.agents.code_info import find_functions, pick_function
 from sparring_partner.agents.errors import GenerationError
 from sparring_partner.agents.testgen import (
+    _kind_from_annotation,
+    args_fit,
     clean_code,
     edge_cases,
     exploration_harness,
@@ -18,7 +20,7 @@ from sparring_partner.agents.testgen import (
 from sparring_partner.config import Settings
 from sparring_partner.sandbox import LocalBackend, Sandbox
 from sparring_partner.session import ParamSpec, PropertySpec, Session
-from sparring_partner.testing.harness import check_predicates
+from sparring_partner.testing.harness import check_predicates, check_strategy
 
 SETTINGS = Settings(_env_file=None)
 TWO_FUNCTIONS = '''\
@@ -61,9 +63,9 @@ def test_pick_function_by_intent_name_or_explicit_name():
 
 
 def test_pick_function_errors():
-    with pytest.raises(ValueError, match="no top-level function named"):
+    with pytest.raises(ValueError, match="no top-level function or class named"):
         pick_function(TWO_FUNCTIONS, "x", name="missing")
-    with pytest.raises(ValueError, match="no top-level function"):
+    with pytest.raises(ValueError, match="no top-level function, or class with a public method"):
         pick_function("class LRU:\n    pass\n", "cache")
     with pytest.raises(SyntaxError):
         pick_function("def f(:\n", "x")
@@ -138,6 +140,29 @@ def test_interval_edge_cases_include_the_classic_traps():
     assert cases["unsorted"] == ([[5, 6], [1, 2]],)
     assert cases["empty"] == ([],)
     assert "huge values" in cases and "negatives" in cases and "duplicates" in cases
+
+
+def test_sorted_intervals_keep_the_traps_but_not_unsorted_input():
+    cases = {c.label: c.args for c in edge_cases([ParamSpec("intervals", "sorted_intervals")])}
+    assert cases["touching ranges"] == ([[1, 4], [4, 5]],)
+    assert "unsorted" not in cases  # the intent promised sorted input
+    namespace = {"st": __import__("hypothesis").strategies}
+    exec(fallback_strategy([ParamSpec("intervals", "sorted_intervals")]), namespace)
+    assert check_strategy(namespace["strategy"], 1, kinds=["sorted_intervals"]) == []
+
+
+def test_sorted_kinds_can_be_relaxed_for_follow_up_questions():
+    params = [ParamSpec("intervals", "sorted_intervals")]
+    unsorted = ([[5, 6], [1, 2]],)
+    assert args_fit(([[1, 2], [5, 6]],), params)
+    assert not args_fit(unsorted, params)  # not what the code was promised...
+    assert args_fit(unsorted, params, strict=False)  # ...but a fair "what if?"
+    assert not args_fit(([[6, 5]],), params, strict=False)  # still has to be intervals
+
+
+def test_the_intent_decides_whether_intervals_come_sorted():
+    assert _kind_from_annotation("list[list[int]]", "merge sorted intervals") == "sorted_intervals"
+    assert _kind_from_annotation("list[list[int]]", "merge intervals") == "intervals"
 
 
 def test_search_edge_cases_cover_every_boundary():

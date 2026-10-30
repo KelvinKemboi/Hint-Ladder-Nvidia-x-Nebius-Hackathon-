@@ -7,7 +7,7 @@ from collections.abc import Coroutine
 from typing import Any
 
 from sparring_partner.agents import tracer
-from sparring_partner.agents.code_info import FunctionInfo, pick_function
+from sparring_partner.agents.code_info import ClassInfo, Target, pick_function
 from sparring_partner.agents.diagnosis import Diagnoser, counterexample_args
 from sparring_partner.agents.errors import GenerationError, NotAvailable, UserCodeError
 from sparring_partner.agents.gate import HintGate
@@ -19,6 +19,8 @@ from sparring_partner.agents.predict import (
     describe_actual,
     parse_prediction,
     question,
+    stopped_after,
+    what_should,
 )
 from sparring_partner.agents.properties import PropertyProposer, PropertyValidationError
 from sparring_partner.agents.review import Finding, Reviewer
@@ -27,6 +29,7 @@ from sparring_partner.agents.testgen import (
     edge_cases,
     exploration_harness,
     infer_inputs,
+    infer_operations,
     write_strategy,
 )
 from sparring_partner.agents.verify import FixReport, FixVerifier, next_risk
@@ -46,6 +49,10 @@ logger = logging.getLogger(__name__)
 
 S = SessionState
 
+# Share of the sandbox's time limit a bug hunt may use before it stops and reports
+# what it found, so code that loops forever on most inputs still gets a result.
+HUNT_BUDGET = 0.7
+
 
 class Orchestrator:
     def __init__(
@@ -60,11 +67,13 @@ class Orchestrator:
         self.sandbox = sandbox
         self.settings = settings or get_settings()
         self.proposer = PropertyProposer(llm, sandbox)
+        self.budget_s = self.settings.sandbox_timeout_s * HUNT_BUDGET
         self.diagnoser = Diagnoser(
             llm,
             sandbox,
             max_examples=self.settings.explore_max_examples,
             call_timeout_s=self.settings.explore_call_timeout_s,
+            budget_s=self.budget_s,
         )
         self.gate = HintGate(llm, sandbox, call_timeout_s=self.settings.explore_call_timeout_s)
         self.hints = HintWriter(llm, self.gate, self.diagnoser)
@@ -74,6 +83,7 @@ class Orchestrator:
             max_examples=self.settings.verify_examples,
             call_timeout_s=timeout,
             batches=self.settings.verify_batches,
+            budget_s=self.budget_s,
         )
         self.reviewer = Reviewer(llm, sandbox, call_timeout_s=timeout)
         self._tasks: set[asyncio.Task[Any]] = set()
@@ -84,10 +94,14 @@ class Orchestrator:
         """New session in the intent state, with validated candidate properties."""
         fn = _pick(code, intent, function)
         session = self.store.add(Session(code=code, intent=intent, function=fn.name, mode=mode))
-        self._progress(session, f"Reading {fn.name}() and proposing properties")
+        if isinstance(fn, ClassInfo):
+            session.methods = fn.arities()
+        self._progress(session, f"Reading {_shown(session)} and proposing properties")
 
         inputs, drafts = await asyncio.gather(
-            infer_inputs(self.llm, fn, intent, code),
+            infer_operations(self.llm, fn, intent, code)
+            if isinstance(fn, ClassInfo)
+            else infer_inputs(self.llm, fn, intent, code),
             self.proposer.draft(session, fn),
         )
         session.params = inputs.params
@@ -147,10 +161,11 @@ class Orchestrator:
 
             cases = edge_cases(session.params)
             max_examples = self.settings.explore_max_examples
+            inputs = "call sequences" if session.stateful else "inputs"
             self._progress(
                 session,
                 f"Testing {len(session.properties)} properties on {max_examples} generated "
-                f"inputs each, plus {len(cases)} edge cases",
+                f"{inputs} each, plus {len(cases)} edge cases",
                 properties=len(session.properties),
                 max_examples=max_examples,
                 edge_cases=len(cases),
@@ -161,6 +176,7 @@ class Orchestrator:
                 cases,
                 max_examples=max_examples,
                 call_timeout_s=self.settings.explore_call_timeout_s,
+                budget_s=self.budget_s,
             )
             result = await self.sandbox.run(session.code, harness)
             if result.timed_out:
@@ -168,6 +184,8 @@ class Orchestrator:
             if result.error:
                 raise GenerationError(f"the bug hunt crashed: {result.error.type}")
             session.counterexamples = result.value["counterexamples"]
+            if result.value.get("out_of_time"):
+                self._progress(session, "Stopped the hunt early: the code kept running out of time")
         except Exception as exc:
             logger.exception("exploration failed for session %s", session.id)
             self.store.publish(session.id, "error", f"Exploration failed: {exc}")
@@ -225,7 +243,10 @@ class Orchestrator:
         _require(session, S.PREDICTING, S.HINTING)
         text = question(session)
         call = current_case(session)["call"]
-        asked = any(m["kind"] == "question" and call in m["text"] for m in session.messages)
+        asked = any(
+            m["kind"] == "question" and (call in m["text"] or text in m["text"])
+            for m in session.messages
+        )
         if not asked:
             await self._say(session, [text], kind="question")
         return {"question": text, "call": current_case(session)["call"]}
@@ -252,7 +273,7 @@ class Orchestrator:
         spec_line = _spec_reminder(session, result, prediction)
         safer_nudge = (
             "Check your answer against your spec again: "
-            f"what should a correct {session.function}() return?"
+            f"what should a correct {_shown(session)} return?"
         )
         if correct and not result["matches_actual"]:
             outcome = "revealed"
@@ -423,7 +444,7 @@ class Orchestrator:
             lead = "Not yet: your spec still breaks."
         message = await self._say(
             session,
-            [f"{lead} What should `{call}` return?"],
+            [f"{lead} {what_should(session, call)}"],
             kind="question",
             data=_fix_data(report),
         )
@@ -441,11 +462,12 @@ class Orchestrator:
             logger.exception("next risk failed for session %s", session.id)
             return None
         if ce is None:
-            return risk if await self._ask(session, risk, kind="risk", llm=True) else None
+            return risk if await self._ask_or_drop(session, risk, kind="risk") else None
         self._start_case(session, [ce])
         self._move(session, S.PREDICTING)
-        text = f"{risk} Predict: what should `{ce['call']}` return?"
-        if not await self._ask(session, text, kind="question", llm=True):
+        ask = what_should(session, ce["call"])
+        text = f"{risk} Predict: {ask[0].lower()}{ask[1:]}"
+        if not await self._ask_or_drop(session, text, kind="question"):
             text = await self._say(session, [question(session)], kind="question")
         self._start(self._diagnose(session))
         return text
@@ -483,6 +505,15 @@ class Orchestrator:
         session.current_case = 0
         session.reset_ladder()
         session.trace = session.evidence = session.diagnosis = None
+
+    async def _ask_or_drop(self, session: Session, text: str, *, kind: str) -> bool:
+        """`_ask` for optional model-written text: a failing gate model drops it, so the
+        step it follows (e.g. a fix that passed) still succeeds."""
+        try:
+            return await self._ask(session, text, kind=kind, llm=True)
+        except Exception:
+            logger.exception("gate failed on optional %s text for session %s", kind, session.id)
+            return False
 
     async def _ask(self, session: Session, text: str, *, kind: str, llm: bool) -> bool:
         """Send `text` if the gate allows it (model layer for model-written text); else drop it."""
@@ -547,7 +578,7 @@ class Orchestrator:
         task.add_done_callback(self._tasks.discard)
 
 
-def _pick(code: str, intent: str, function: str | None) -> FunctionInfo:
+def _pick(code: str, intent: str, function: str | None) -> Target:
     try:
         return pick_function(code, intent, function)
     except SyntaxError as exc:
@@ -561,14 +592,17 @@ def _require(session: Session, *states: SessionState) -> None:
         raise InvalidTransition(f"not available in state {session.state}")
 
 
+def _shown(session: Session) -> str:
+    return f"the {session.function} class" if session.stateful else f"{session.function}()"
+
+
 def _spec_reminder(session: Session, result: dict[str, Any], prediction: Prediction) -> str:
     if result["violates"]:
         return f'Check it against: "{result["violates"][0].rstrip(".")}".'
     if prediction.kind == "error":
         return "Would a correct implementation really fail on this input?"
     return (
-        f'Re-read the intent: "{session.intent}". '
-        f"What should a correct {session.function}() return?"
+        f'Re-read the intent: "{session.intent}". What should a correct {_shown(session)} return?'
     )
 
 
@@ -579,6 +613,8 @@ def _shown_prediction(prediction: Prediction) -> dict[str, Any]:
 
 
 def _shown_outcome(actual: dict[str, Any]) -> dict[str, Any]:
+    if actual.get("timed_out"):
+        return {"kind": "timeout", "text": f"still running after {stopped_after(actual)}"}
     if actual["error"]:
         return {"kind": "error", "text": actual["error"]}
     return {"kind": "value", "text": actual["output"]}

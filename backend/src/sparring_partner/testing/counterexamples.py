@@ -37,6 +37,8 @@ class Counterexample:
     exception_line: int | None = None  # line in the user's code where it raised
     check_errors: dict[str, str] = field(default_factory=dict)  # property -> predicate error
     complexity: int = 0
+    timed_out: bool = False  # stopped by the per-call time limit (e.g. an infinite loop)
+    hand_picked: bool = False  # an edge case rather than a Hypothesis find
 
     @property
     def raised(self) -> bool:
@@ -44,6 +46,8 @@ class Counterexample:
 
     def signature(self) -> tuple[Any, ...]:
         """Approximate root-cause key: where it crashed, or which properties it breaks."""
+        if self.timed_out:  # where a loop gets interrupted is arbitrary
+            return ("timeout",)
         if self.raised:
             return ("raise", self.exception_type, self.exception_line)
         return ("wrong-output", *self.violated_properties)
@@ -81,13 +85,16 @@ def rank_key(ce: Counterexample, property_order: Sequence[str] = ()) -> tuple[An
 
     1. smallest input (easiest to predict by hand)
     2. a wrong output before a crash (gives the user something to predict)
-    3. fewest violated properties (one clear lesson at a time)
-    4. the order the user confirmed the properties in
+    3. a hand-picked edge case over an equally small Hypothesis find: edge cases are
+       chosen to be readable ([[1, 4], [4, 5]] rather than [[0, 0], [0, 0]])
+    4. fewest violated properties (one clear lesson at a time)
+    5. the order the user confirmed the properties in
     """
     order = {name: i for i, name in enumerate(property_order)}
     return (
         ce.complexity,
         ce.raised,
+        not ce.hand_picked,
         len(ce.violated_properties),
         order.get(ce.violated_property, len(order)),
     )

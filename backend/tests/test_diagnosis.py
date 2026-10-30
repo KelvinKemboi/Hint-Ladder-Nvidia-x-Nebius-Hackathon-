@@ -124,7 +124,7 @@ async def test_static_problems_are_sent_back(diagnoser_for):
     assert diagnosis.verified and diagnosis.attempts == 3
     first, second = (m[-1]["content"] for m in llm.asked("DiagnosisDraft")[1:])
     assert "line must be between 1 and" in first
-    assert "must still define merge_intervals()" in first
+    assert "must still define merge_intervals" in first
     assert "identical to the original code" in second
 
 

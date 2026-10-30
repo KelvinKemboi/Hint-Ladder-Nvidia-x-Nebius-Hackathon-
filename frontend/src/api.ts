@@ -14,7 +14,7 @@ export type SessionState =
 export type Property = { id: string; statement: string; predicate: string };
 export type Param = { name: string; kind: string; description: string };
 
-export type ShownValue = { kind: "value" | "error"; text: string };
+export type ShownValue = { kind: "value" | "error" | "timeout"; text: string };
 
 export type TraceRow = { step: number; vars: Record<string, string>; marked: boolean };
 export type TraceTable = {

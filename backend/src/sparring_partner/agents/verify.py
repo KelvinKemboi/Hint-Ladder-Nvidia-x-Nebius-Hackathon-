@@ -21,9 +21,15 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
-from sparring_partner.agents.code_info import find_functions
+from sparring_partner.agents.code_info import defined_names
 from sparring_partner.agents.diagnosis import counterexample_args
-from sparring_partner.agents.testgen import JsonLLM, _literal_args, args_fit, edge_cases
+from sparring_partner.agents.testgen import (
+    OPERATIONS,
+    JsonLLM,
+    _literal_args,
+    args_fit,
+    edge_cases,
+)
 from sparring_partner.llm import Message
 from sparring_partner.sandbox import Sandbox
 from sparring_partner.session import Session
@@ -120,12 +126,20 @@ def shifted(value: Any, k: int) -> Any:
     return value
 
 
-def nearby_variants(counterexamples: list[dict[str, Any]]) -> list[tuple[Any, ...]]:
+def nearby_variants(
+    counterexamples: list[dict[str, Any]], *, stateful: bool = False
+) -> list[tuple[Any, ...]]:
+    """For a class, only the method calls shift: a different constructor argument
+    (e.g. a capacity of -2) can make the sequence invalid rather than nearby."""
     variants: dict[str, tuple[Any, ...]] = {}
     for ce in counterexamples:
         args = counterexample_args(ce)
         for k in SHIFTS:
-            variant = shifted(args, k)
+            if stateful:
+                first, *calls = args[0]
+                variant = ([first, *shifted(calls, k)],)
+            else:
+                variant = shifted(args, k)
             if variant != args:
                 variants.setdefault(repr(variant), variant)
     return list(variants.values())
@@ -140,21 +154,24 @@ class FixVerifier:
         max_examples: int = 500,
         call_timeout_s: float = 1.0,
         batches: int = 5,
+        budget_s: float | None = None,
     ):
         self.sandbox = sandbox
         self.max_examples = max_examples
         self.call_timeout_s = call_timeout_s
+        self.budget_s = budget_s
         self.batches = max(1, min(batches, max_examples))
 
     async def verify(
         self, session: Session, fix: str, on_progress: Progress | None = None
     ) -> FixReport:
         try:
-            names = {fn.name for fn in find_functions(fix)}
+            names = defined_names(fix)
         except SyntaxError as exc:
             return FixReport("invalid", f"SyntaxError on line {exc.lineno}: {exc.msg}")
         if session.function not in names:
-            return FixReport("invalid", f"the fix must still define {session.function}()")
+            shown = session.function if session.stateful else f"{session.function}()"
+            return FixReport("invalid", f"the fix must still define {shown}")
         if session.strategy_code is None:
             return FixReport("invalid", "there are no tests to check against yet")
 
@@ -174,13 +191,14 @@ class FixVerifier:
                 "max_examples": n,
                 "seed": random.randrange(1, 2**31),  # fresh inputs every time
                 "call_timeout_s": self.call_timeout_s,
+                "budget_s": self.budget_s,
             }
             for n in sizes
         ]
         configs[0] |= {
             "examples": originals + [case.args for case in edge_cases(session.params)],
             "originals": originals,
-            "variants": nearby_variants(session.counterexamples),
+            "variants": nearby_variants(session.counterexamples, stateful=session.stateful),
         }
 
         checked = 0
@@ -207,6 +225,10 @@ class FixVerifier:
             base.counterexamples = [
                 ce.to_dict() for ce in dedupe([Counterexample(**d) for d in found], order)
             ]
+        elif any(r["out_of_time"] for r in reports):
+            # Not every input was tried, so the fix isn't verified (it is very slow,
+            # or loops forever on inputs a smaller time limit cut short).
+            base.outcome, base.reason = "failed", "the tests ran out of time on your fix"
         elif first["variant_failures"]:
             base.outcome = "special_cased"
             base.reason = "it fails on inputs right next to the original failing one"
@@ -255,6 +277,12 @@ async def next_risk(
 ) -> tuple[str, dict[str, Any] | None]:
     """A risk the tests may not have covered, and its counterexample if the code fails it."""
     tested = sorted({case.label for case in edge_cases(session.params)})
+    shape = (
+        "\nThe example input is an argument tuple holding one operation list: "
+        + OPERATIONS.format(cls=session.function, example="...").replace("args[0]", "it")
+        if session.stateful
+        else ""
+    )
     messages: list[Message] = [
         {"role": "system", "content": "You are a sharp code reviewer. Reply with JSON only."},
         {
@@ -266,13 +294,14 @@ async def next_risk(
                 + f"\n\nEdge cases already tested: {', '.join(tested) or '(none)'}\n\n"
                 "Name ONE input risk these tests may not cover, as a short question to the "
                 "learner (e.g. 'What if the input isn't sorted?'), and an example input that "
-                "exercises it. Don't say whether the code handles it."
+                "exercises it. Don't say whether the code handles it." + shape
             ),
         },
     ]
     draft = await llm.complete_json("deep", messages, RiskDraft)
     args = _literal_args(draft.example_args, len(session.params) or 1)
-    if args is None or not args_fit(args, session.params):
+    # Not strict: a risk is often an input the code assumed away, like unsorted input.
+    if args is None or not args_fit(args, session.params, session.methods, strict=False):
         return draft.question, None
     config = {
         "function": session.function,

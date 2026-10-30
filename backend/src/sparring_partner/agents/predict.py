@@ -1,6 +1,7 @@
 """Predict-then-reveal: ask what the failing call should return, then compare."""
 
 import ast
+import contextlib
 import json
 import re
 from dataclasses import dataclass
@@ -75,8 +76,37 @@ def current_case(session: Session) -> dict[str, Any]:
 
 
 def question(session: Session) -> str:
-    return f"What should `{current_case(session)['call']}` return?"
+    return what_should(session, current_case(session)["call"])
+
+
+def what_should(session: Session, call: str) -> str:
+    """What should `f(x)` return? For a class, the question is about the last call:
+    After `cache = LRUCache(2); cache.put(1, 1)`, what should `cache.get(1)` return?"""
+    setup, _, last = call.rpartition("; ")
+    if session.stateful and setup:
+        return f"After `{setup}`, what should `{last}` return?"
+    return f"What should `{call}` return?"
 
 
 def describe_actual(actual: dict[str, Any]) -> str:
+    if actual.get("timed_out"):
+        return f"never finishes: it was still running when stopped after {stopped_after(actual)}"
     return f"raises `{actual['error']}`" if actual["error"] else f"returns `{actual['output']}`"
+
+
+def case_outcome(session: Session, ce: dict[str, Any]) -> dict[str, Any]:
+    """A counterexample's outcome as `describe_actual` takes it. For a class, the
+    output is the last call's result (what the prediction question asks about)."""
+    if ce["exception_type"]:
+        error = f"{ce['exception_type']}: {ce['exception_message']}"
+        return {"output": None, "error": error, "timed_out": ce.get("timed_out", False)}
+    output = ce["output"]
+    if session.stateful:
+        with contextlib.suppress(ValueError, SyntaxError, TypeError, IndexError):
+            output = repr(ast.literal_eval(output)[-1])
+    return {"output": output, "error": None, "timed_out": False}
+
+
+def stopped_after(actual: dict[str, Any]) -> str:
+    """'1.0s' from 'TimeoutError: did not finish within 1.0s'."""
+    return actual["error"].rpartition(" ")[2] if actual.get("error") else "the time limit"

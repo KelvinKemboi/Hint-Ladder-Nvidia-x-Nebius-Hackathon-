@@ -4,7 +4,6 @@ from fakes import COVERED, DIAGNOSIS, FIXED_MERGE, HALF_FIXED_MERGE, NO_OVERLAP,
 from test_api import create, merge_llm, wait_for_state
 from test_coaching import ALLOW, predicting
 from test_review import REVIEW_CODE
-from test_verify import FIXED_WITH_LITERAL
 
 from sparring_partner.agents.properties import REVIEW_FOCUS
 
@@ -93,6 +92,14 @@ def test_a_failing_risk_becomes_the_next_question(make_client):
     assert client.get(f"/api/sessions/{body['id']}/postmortem").status_code == 200
 
 
+# A correct fix that also special-cases the first failing input
+FIXED_FOR_TOUCHING = FIXED_MERGE.replace(
+    '    """Merge overlapping intervals."""\n',
+    '    """Merge overlapping intervals."""\n'
+    "    if intervals == [[1, 4], [4, 5]]:\n"
+    "        return [[1, 5]]\n",
+)
+
 SORTED_STRATEGY = (
     "def strategy():\n"
     "    interval = st.tuples(st.integers(0, 20), st.integers(0, 5)).map(\n"
@@ -109,10 +116,10 @@ def test_invalid_and_hardcoded_fixes_keep_the_case(make_client):
     assert invalid["outcome"] == "invalid" and invalid["state"] == "predicting"
     assert invalid["message"] == "That fix can't be checked."  # line numbers stay gated
 
-    hard = fix(client, sid, FIXED_WITH_LITERAL).json()
+    hard = fix(client, sid, FIXED_FOR_TOUCHING).json()
     assert hard["outcome"] == "special_cased"
-    assert "exact failing input (`[[0, 0], [0, 0]]`)" in hard["message"]
-    assert orchestrator.store.get(sid).code != FIXED_WITH_LITERAL  # not adopted
+    assert "exact failing input (`[[1, 4], [4, 5]]`)" in hard["message"]
+    assert orchestrator.store.get(sid).code != FIXED_FOR_TOUCHING  # not adopted
 
 
 def test_postmortem_before_the_fix_is_a_409(make_client):

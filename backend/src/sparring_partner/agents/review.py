@@ -290,7 +290,7 @@ class Reviewer:
         runnable = {
             i: args
             for i, args in inputs.items()
-            if args is not None and args_fit(args, session.params)
+            if args is not None and args_fit(args, session.params, session.methods)
         }
         failures = await self._failures(session, list(runnable.values()))
         failing = {list(runnable)[j]: ce for j, ce in failures.items()}

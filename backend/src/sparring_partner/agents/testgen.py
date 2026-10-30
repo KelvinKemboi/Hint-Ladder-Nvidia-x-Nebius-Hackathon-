@@ -4,6 +4,9 @@ The fast model infers what each parameter is and writes a Hypothesis strategy
 for the argument tuple. The tests themselves come from the confirmed properties:
 the harness turns each predicate into a shrinking @given search
 (testing.capture.find_counterexamples) and also runs the edge cases below.
+
+A class is tested as a state machine instead: its one "argument" is a sequence of
+operations (see OPERATIONS), and the strategy draws arguments for each method.
 """
 
 import ast
@@ -14,7 +17,7 @@ from typing import Any, Literal, Protocol
 
 from pydantic import BaseModel, Field
 
-from sparring_partner.agents.code_info import FunctionInfo
+from sparring_partner.agents.code_info import ClassInfo, FunctionInfo, Target
 from sparring_partner.agents.errors import GenerationError
 from sparring_partner.llm import Message, Role, SchemaT
 from sparring_partner.sandbox import Sandbox
@@ -31,6 +34,7 @@ Kind = Literal[
     "sorted_list_int",
     "list_str",
     "intervals",
+    "sorted_intervals",
     "dict_str_int",
     "other",
 ]
@@ -43,11 +47,19 @@ KIND_GUIDE = """\
 - list_int: list of integers, any order
 - sorted_list_int: list of integers the function expects to be sorted ascending
 - list_str: list of strings
-- intervals: list of [start, end] integer pairs with start <= end
+- intervals: list of [start, end] integer pairs with start <= end, in any order
+- sorted_intervals: intervals the function expects to be sorted by start
 - dict_str_int: dict from str to int
 - other: anything else"""
 
 HUGE = 10**18
+
+# How a class's operation sequence is shown to the models.
+OPERATIONS = """\
+args[0] is a list of operations run on one object: the first, ["{cls}", *constructor_args], \
+creates it, and each later one, ["method_name", *args], calls a method on it. output is a \
+list of what each operation returned, in order (None for the constructor), so output[i] is \
+the result of args[0][i]. Example: args[0] = {example}."""
 
 # Shared by every prompt that has to decide what a correct answer is.
 CONVENTIONS = (
@@ -77,6 +89,11 @@ EDGE_CASES: dict[str, list[tuple[str, Any]]] = {
                   ("duplicates", [[1, 2], [1, 2]]), ("zero width", [[3, 3]]),
                   ("negatives", [[-5, -1], [-3, 0]]),
                   ("huge values", [[0, HUGE], [HUGE, HUGE + 1]])],
+    "sorted_intervals": [("empty", []), ("single interval", [[1, 2]]),
+                         ("touching ranges", [[1, 4], [4, 5]]), ("overlapping", [[1, 3], [2, 6]]),
+                         ("nested", [[1, 10], [2, 3]]), ("duplicates", [[1, 2], [1, 2]]),
+                         ("zero width", [[3, 3]]), ("negatives", [[-5, -1], [-3, 0]]),
+                         ("huge values", [[0, HUGE], [HUGE, HUGE + 1]])],
     "dict_str_int": [("empty", {}), ("single key", {"a": 1}), ("negative value", {"a": -1}),
                      ("huge value", {"a": HUGE})],
 }  # fmt: skip
@@ -91,6 +108,7 @@ TYPICAL: dict[str, Any] = {
     "sorted_list_int": [1, 3, 5, 7],
     "list_str": ["b", "a"],
     "intervals": [[1, 3], [2, 4]],
+    "sorted_intervals": [[1, 3], [2, 4]],
     "dict_str_int": {"a": 1, "b": 2},
 }
 
@@ -106,6 +124,10 @@ FALLBACK_STRATEGIES: dict[str, str] = {
     "intervals": (
         "st.lists(st.tuples(st.integers(-10, 20), st.integers(0, 6))"
         ".map(lambda p: [p[0], p[0] + p[1]]), max_size=6)"
+    ),
+    "sorted_intervals": (
+        "st.lists(st.tuples(st.integers(-10, 20), st.integers(0, 6))"
+        ".map(lambda p: [p[0], p[0] + p[1]]), max_size=6).map(sorted)"
     ),
     "dict_str_int": "st.dictionaries(st.text(max_size=3), st.integers(-20, 20), max_size=5)",
 }
@@ -209,6 +231,59 @@ async def infer_inputs(llm: JsonLLM, fn: FunctionInfo, intent: str, code: str) -
     return InputInfo(params, example, worked)
 
 
+class OperationExamples(BaseModel):
+    examples: list[WorkedExample] = Field(min_length=1, max_length=4)
+
+
+async def infer_operations(llm: JsonLLM, cls: ClassInfo, intent: str, code: str) -> InputInfo:
+    """A class's one parameter (its operation sequence), plus worked examples:
+    operation sequences and what a correct class returns for each operation."""
+    params = [ParamSpec("ops", "operations", f"calls on one {cls.name} object")]
+    messages: list[Message] = [
+        {
+            "role": "system",
+            "content": "You write worked examples for Python classes. Reply with JSON only.",
+        },
+        {
+            "role": "user",
+            "content": (
+                f"Intent: {intent}\n\n{cls.signature()}\n\nCode:\n```python\n{code}\n```\n\n"
+                "Give 2 to 4 worked examples, each a short sequence of operations and the outputs "
+                "a CORRECT implementation of the intent returns (not what this code returns; it "
+                "may be buggy). Include one that exercises a limit or boundary.\n"
+                + OPERATIONS.format(cls=cls.name, example=operations_example(cls))
+                + "\nargs is the argument tuple, so write it as a one-element tuple: "
+                "'([[...], [...]],)'. output is the list of results."
+            ),
+        },
+    ]
+    worked: list[tuple[tuple[Any, ...], Any]] = []
+    try:
+        draft = await llm.complete_json("fast", messages, OperationExamples)
+        for example in draft.examples:
+            args = _literal_args(example.args, 1)
+            try:
+                output = ast.literal_eval(example.output)
+            except (ValueError, SyntaxError):
+                continue
+            if (
+                args is not None
+                and args_fit(args, params, cls.arities())
+                and isinstance(output, list)
+            ):
+                worked.append((args, output))
+    except Exception as exc:
+        logger.warning("no worked examples for %s: %s", cls.name, exc)
+    return InputInfo(params, worked[0][0] if worked else None, worked)
+
+
+def operations_example(cls: ClassInfo) -> str:
+    """A made-up sequence in the right shape, e.g. [["LRUCache", 1], ["get", 1]]."""
+    ops = [[cls.name, *[1] * len(cls.init.params)]]
+    ops += [[m.name, *[1] * len(m.params)] for m in cls.methods[:3]]
+    return repr(ops)
+
+
 def _kind_from_annotation(annotation: str | None, intent: str) -> str:
     if annotation is None:
         return "other"
@@ -221,17 +296,38 @@ def _kind_from_annotation(annotation: str | None, intent: str) -> str:
     if "interval" in intent.lower() and normalized.lower().startswith(
         ("list[list[int]]", "list[tuple[int")
     ):
-        return "intervals"
+        return "sorted_intervals" if "sorted" in intent.lower() else "intervals"
     return "other"
 
 
-def args_fit(args: tuple[Any, ...], params: list[ParamSpec]) -> bool:
-    """Do the arguments have the shape their parameter kinds promise?"""
+# Inputs the code was told it won't get still fit the shape: "what if it isn't sorted?"
+RELAXED = {"sorted_list_int": "list_int", "sorted_intervals": "intervals"}
+
+
+def args_fit(
+    args: tuple[Any, ...],
+    params: list[ParamSpec],
+    methods: dict[str, int] | None = None,
+    *,
+    strict: bool = True,
+) -> bool:
+    """Do the arguments have the shape their parameter kinds promise? With
+    `strict=False`, a sorted kind accepts unsorted values too. For a class, `methods`
+    (arguments per call) checks each operation's method name and argument count."""
     from sparring_partner.testing.harness import KIND_CHECKS
 
-    return len(args) == len(params) and all(
-        KIND_CHECKS.get(p.kind, lambda _: True)(arg) for arg, p in zip(args, params, strict=True)
-    )
+    if len(args) != len(params):
+        return False
+    for arg, p in zip(args, params, strict=True):
+        kind = p.kind if strict else RELAXED.get(p.kind, p.kind)
+        if not KIND_CHECKS.get(kind, lambda _: True)(arg):
+            return False
+    if methods and params and params[0].kind == "operations":
+        first, *calls = args[0]
+        return len(first) - 1 == methods.get("__init__") and all(
+            op[0] != "__init__" and methods.get(op[0]) == len(op) - 1 for op in calls
+        )
+    return True
 
 
 def _literal_args(text: str, arity: int) -> tuple[Any, ...] | None:
@@ -334,7 +430,14 @@ def clean_code(code: str) -> str:
     return code
 
 
-def fallback_strategy(params: list[ParamSpec]) -> str | None:
+def fallback_strategy(params: list[ParamSpec], methods: dict[str, int] | None = None) -> str | None:
+    if methods:  # small positive ints: keys collide and sizes stay readable
+        calls = ",\n".join(
+            f"        {name!r}: st.tuples({', '.join([bound] * n)})"
+            for name, n in methods.items()
+            for bound in ["st.integers(1, 3)" if name == "__init__" else "st.integers(1, 5)"]
+        )
+        return f"def strategy():\n    return {{\n{calls},\n    }}\n"
     if not params or any(p.kind not in FALLBACK_STRATEGIES for p in params):
         return None
     parts = ", ".join(FALLBACK_STRATEGIES[p.kind] for p in params)
@@ -342,41 +445,22 @@ def fallback_strategy(params: list[ParamSpec]) -> str | None:
 
 
 async def write_strategy(
-    llm: JsonLLM, sandbox: Sandbox, session: Session, fn: FunctionInfo, attempts: int = 3
+    llm: JsonLLM, sandbox: Sandbox, session: Session, fn: Target, attempts: int = 3
 ) -> str:
-    """Model-written strategy for the argument tuple, linted and test-drawn in the sandbox."""
-    params = "\n".join(f"- {p.name}: {p.kind} ({p.description})" for p in session.params)
+    """Model-written strategy for the argument tuple (for a class, one per method),
+    linted and test-drawn in the sandbox."""
     messages: list[Message] = [
         {
             "role": "system",
             "content": "You write Hypothesis strategies that hunt for bugs. Reply with JSON only.",
         },
-        {
-            "role": "user",
-            "content": (
-                f"Intent: {session.intent}\nSignature: {fn.signature()}\nParameters:\n{params}\n\n"
-                "Write Python source defining `def strategy():` that returns a Hypothesis strategy "
-                f"drawing a tuple of exactly {len(fn.params)} positional argument(s), using "
-                "`st.tuples(...)`. `st` (hypothesis.strategies) is already imported.\n"
-                "Rules:\n"
-                "- Draw every input the intent allows, including the awkward ones: empty, "
-                "single element, duplicates, boundaries, negatives, values that touch or tie.\n"
-                "- Don't assume the input is sorted, unique or non-empty unless the intent, "
-                "signature or parameter kind says so: unsorted input breaks a lot of code.\n"
-                "- Keep values small (mostly -20..20, sizes up to 8) so failures shrink well, "
-                "and respect real constraints (sorted_list_int is sorted; intervals have "
-                "start <= end).\n"
-                "- Draw only plain literals: int, float, str, bool, None, list, tuple, dict.\n"
-                "- No imports other than hypothesis, math, string. No randomness, no I/O."
-            ),
-        },
+        {"role": "user", "content": _strategy_task(session, fn)},
     ]
     errors: list[str] = []
     for _ in range(attempts):
         draft = await llm.complete_json("fast", messages, StrategyDraft)
         code = clean_code(draft.code)
-        kinds = [p.kind for p in session.params]
-        errors = lint_strategy(code) or await _check_strategy_in_sandbox(sandbox, code, kinds)
+        errors = lint_strategy(code) or await _check_strategy_in_sandbox(sandbox, code, session)
         if not errors:
             return code
         messages += [
@@ -387,19 +471,64 @@ async def write_strategy(
             },
         ]
 
-    if fallback := fallback_strategy(session.params):
+    if fallback := fallback_strategy(session.params, session.methods):
         logger.warning("using fallback strategy after %d attempts: %s", attempts, errors)
         return fallback
     raise GenerationError(f"could not write a working input strategy: {'; '.join(errors)}")
 
 
-async def _check_strategy_in_sandbox(sandbox: Sandbox, code: str, kinds: list[str]) -> list[str]:
+def _strategy_task(session: Session, fn: Target) -> str:
+    if isinstance(fn, ClassInfo):
+        keys = ", ".join(repr(name) for name in session.methods)
+        return (
+            f"Intent: {session.intent}\n\n{fn.signature()}\n\n"
+            "The class is tested as a state machine: Hypothesis creates an object, then calls "
+            "its methods in random order and checks the spec after every call.\n"
+            "Write Python source defining `def strategy():` that returns a dict with one key "
+            f"per call ({keys}). Each value is a strategy drawing that call's argument "
+            "tuple with `st.tuples(...)` (use `st.tuples()` for a call with no arguments). "
+            "`st` (hypothesis.strategies) is already imported.\n"
+            "Rules:\n"
+            "- Draw keys and items from a SMALL range (e.g. st.integers(1, 5)) so calls hit "
+            "the same keys and states repeat; values from a small range too.\n"
+            "- Constructor arguments must be valid and small (e.g. a capacity of 1 to 3), so "
+            "limits are reached within a few calls.\n"
+            "- Draw only plain literals: int, float, str, bool, None, list, tuple, dict.\n"
+            "- No imports other than hypothesis, math, string. No randomness, no I/O."
+        )
+    params = "\n".join(f"- {p.name}: {p.kind} ({p.description})" for p in session.params)
+    return (
+        f"Intent: {session.intent}\nSignature: {fn.signature()}\nParameters:\n{params}\n\n"
+        "Write Python source defining `def strategy():` that returns a Hypothesis strategy "
+        f"drawing a tuple of exactly {len(fn.params)} positional argument(s), using "
+        "`st.tuples(...)`. `st` (hypothesis.strategies) is already imported.\n"
+        "Rules:\n"
+        "- Draw every input the intent allows, including the awkward ones: empty, "
+        "single element, duplicates, boundaries, negatives, values that touch or tie.\n"
+        "- Don't assume the input is sorted, unique or non-empty unless the intent, "
+        "signature or parameter kind says so: unsorted input breaks a lot of code.\n"
+        "- Keep values small (mostly -20..20, sizes up to 8) so failures shrink well, "
+        "and respect real constraints (sorted_list_int is sorted; intervals have "
+        "start <= end; sorted_intervals are also sorted by start).\n"
+        "- Draw only plain literals: int, float, str, bool, None, list, tuple, dict, in "
+        "the shape the intent describes (e.g. lists, not tuples, if it says lists).\n"
+        "- No imports other than hypothesis, math, string. No randomness, no I/O."
+    )
+
+
+async def _check_strategy_in_sandbox(sandbox: Sandbox, code: str, session: Session) -> list[str]:
+    kinds = [p.kind for p in session.params]
+    check = (
+        f"check_method_strategies(strategy, {session.methods!r})"
+        if session.stateful
+        else f"check_strategy(strategy, {len(kinds)}, kinds={kinds!r})"
+    )
     harness = (
         "from hypothesis import strategies as st\n"
-        "from sparring_partner.testing.harness import check_strategy\n\n"
+        "from sparring_partner.testing.harness import check_method_strategies, check_strategy\n\n"
         f"{code}\n\n\n"
         "def run(solution, inputs):\n"
-        f"    return check_strategy(strategy, {len(kinds)}, kinds={kinds!r})\n"
+        f"    return {check}\n"
     )
     result = await sandbox.run("", harness)  # an empty solution: only the strategy runs
     if result.timed_out:
@@ -418,8 +547,13 @@ def exploration_harness(
     max_examples: int = 200,
     call_timeout_s: float = 1.0,
     seed: int | None = None,
+    budget_s: float | None = None,
 ) -> str:
-    """Source of the harness that hunts for bugs in the sandbox and reports structured results."""
+    """Source of the harness that hunts for bugs in the sandbox and reports structured results.
+
+    After `budget_s` the hunt stops and reports what it found (e.g. when every call
+    loops forever), instead of running into the sandbox's own time limit.
+    """
     config = {
         "function": session.function,
         "predicates": {p.statement: p.predicate for p in session.properties},
@@ -427,6 +561,7 @@ def exploration_harness(
         "max_examples": max_examples,
         "call_timeout_s": call_timeout_s,
         "seed": seed,
+        "budget_s": budget_s,
     }
     # The strategy comes first so its names can't shadow CONFIG or run().
     return (

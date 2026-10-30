@@ -149,6 +149,18 @@ async def test_next_risk_is_tested_against_the_code(sandbox):
     assert "Edge cases already tested" in prompt and "touching ranges" in prompt
 
 
+async def test_next_risk_may_break_an_assumption_the_intent_made(sandbox):
+    # Demo bug 1: the intent says sorted, so the hunt only draws sorted input and the
+    # comparison fix passes; the follow-up question then tries unsorted input.
+    risk = {"question": "What if the input isn't sorted?", "example_args": "([[5, 6], [1, 2]],)"}
+    session = explored(code=HALF_FIXED_MERGE)
+    session.params = [ParamSpec("intervals", "sorted_intervals")]
+
+    _, ce = await next_risk(FakeLLM(RiskDraft=[risk]), sandbox, session)
+
+    assert ce is not None and ce["call"] == "merge_intervals([[5, 6], [1, 2]])"
+
+
 async def test_postmortem_is_structured():
     llm = FakeLLM(
         PostmortemDraft=[

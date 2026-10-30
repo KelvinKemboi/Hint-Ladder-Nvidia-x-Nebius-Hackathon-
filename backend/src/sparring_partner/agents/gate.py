@@ -10,6 +10,7 @@ Every decision is appended to session.gate_log.
 """
 
 import ast
+import contextlib
 import difflib
 import re
 import textwrap
@@ -18,7 +19,7 @@ from dataclasses import asdict, dataclass
 
 from pydantic import BaseModel
 
-from sparring_partner.agents.code_info import find_functions
+from sparring_partner.agents.code_info import defined_names, find_classes, find_functions
 from sparring_partner.agents.diagnosis import counterexample_args
 from sparring_partner.agents.testgen import JsonLLM
 from sparring_partner.llm import Message
@@ -208,13 +209,25 @@ def _stem(word: str) -> str:
 
 
 def code_snippets(text: str) -> list[str]:
-    """Fenced blocks and inline spans that look like code."""
+    """Fenced blocks and inline spans that look like code.
+
+    A plain value (`-1`, `[[1, 5]]`) is not: it can't carry a fix, and splicing it in
+    over a line only deletes that line, which can make a failing case pass by accident.
+    """
     snippets = []
     for fenced, inline in CODE_SPAN.findall(text):
         snippet = (fenced or inline).strip("\n")
-        if snippet.strip() and (fenced or CODE_CHARS & set(inline)):
+        if snippet.strip() and (fenced or CODE_CHARS & set(inline)) and not _is_value(snippet):
             snippets.append(snippet)
     return snippets
+
+
+def _is_value(snippet: str) -> bool:
+    try:
+        ast.literal_eval(snippet.strip())
+    except (ValueError, SyntaxError, TypeError, MemoryError, RecursionError):
+        return False
+    return True
 
 
 def splice_variants(original: str, snippet: str, function: str) -> list[str]:
@@ -222,7 +235,7 @@ def splice_variants(original: str, snippet: str, function: str) -> list[str]:
     replacing / inserted before each run of lines (re-indented to fit)."""
     snippet = textwrap.dedent(snippet).strip("\n")
     try:
-        if function in {fn.name for fn in find_functions(snippet)}:
+        if function in defined_names(snippet):
             return [snippet]
     except SyntaxError:
         pass
@@ -394,8 +407,14 @@ def _helpers(session: Session) -> set[str]:
 
 
 def _variables(session: Session) -> set[str]:
-    """Local variables of the traced function, excluding its parameters (the input)."""
+    """Local variables of the traced function, excluding its parameters (the input).
+    For a class, every method's parameters are input: `get(key)` names `key` itself."""
     params = {p.name for p in session.params}
+    if session.stateful:
+        with contextlib.suppress(SyntaxError):
+            for cls in find_classes(session.code):
+                if cls.name == session.function:
+                    params |= {p.name for m in (cls.init, *cls.methods) for p in m.params}
     if not session.trace:
         return set()
     return {k for step in session.trace["steps"] for k in step["locals"]} - params
