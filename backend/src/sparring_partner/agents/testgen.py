@@ -56,10 +56,10 @@ HUGE = 10**18
 
 # How a class's operation sequence is shown to the models.
 OPERATIONS = """\
-args[0] is a list of operations run on one object: the first, ["{cls}", *constructor_args], \
+ops is a list of operations run on one object: the first, ["{cls}", *constructor_args], \
 creates it, and each later one, ["method_name", *args], calls a method on it. output is a \
 list of what each operation returned, in order (None for the constructor), so output[i] is \
-the result of args[0][i]. Example: args[0] = {example}."""
+the result of ops[i]. Example: ops = {example}."""
 
 # Shared by every prompt that has to decide what a correct answer is.
 CONVENTIONS = (
@@ -257,7 +257,7 @@ async def infer_operations(llm: JsonLLM, cls: ClassInfo, intent: str, code: str)
                 "buggy). Include one that exercises a limit or boundary. Work out each output "
                 "step by step before writing it down.\n"
                 + OPERATIONS.format(cls=cls.name, example=operations_example(cls))
-                + "\nargs is the argument tuple, so write it as a one-element tuple: "
+                + "\nargs is the one-element tuple (ops,), so write it as "
                 "'([[...], [...]],)'. output is the list of results."
             ),
         },

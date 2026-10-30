@@ -17,7 +17,7 @@ from sparring_partner.agents.testgen import (
     operations_example,
     predicate_check_harness,
 )
-from sparring_partner.llm import Message, StructuredOutputError
+from sparring_partner.llm import Message, Role, StructuredOutputError
 from sparring_partner.sandbox import Sandbox
 from sparring_partner.session import Mode, PropertySpec, Session
 
@@ -37,9 +37,9 @@ REVIEW_FOCUS = (
 
 PREDICATE_RULES = """\
 Predicate rules:
-- Python source defining exactly `def check(args, output):` that returns True when the property \
-holds and False when it doesn't.
-- `args` is a TUPLE of the positional arguments ({params}); `output` is the return value.
+- Python source defining exactly `def check({first}, output):` that returns True when the \
+property holds and False when it doesn't.
+- {inputs}
 - Write normal multi-line Python with 4-space indentation. Never chain statements on one line \
 with semicolons.
 - Derive what must be true from the INTENT, not from the code: the code may be buggy. Never call \
@@ -53,7 +53,9 @@ empty sequence raise) and a wrongly typed output (guard with isinstance where ne
 
 class PropertyDraft(BaseModel):
     statement: str = Field(description="one plain-English sentence a student can check by hand")
-    predicate: str = Field(description="Python source defining check(args, output)")
+    predicate: str = Field(
+        description="Python source defining check(args, output), or check(ops, output) for a class"
+    )
 
 
 class Proposal(BaseModel):
@@ -99,7 +101,7 @@ class PropertyProposer:
             + "Each statement is one plain-English sentence a student can check by hand."
             + (REVIEW_FOCUS if session.mode is Mode.REVIEW else ""),
         )
-        proposal = await self.llm.complete_json("fast", messages, Proposal)
+        proposal = await self.llm.complete_json(_role(fn), messages, Proposal)
         return [
             PropertySpec(d.statement.strip(), clean_code(d.predicate)) for d in proposal.properties
         ]
@@ -133,7 +135,7 @@ class PropertyProposer:
             "Write a predicate for each of these properties. Keep every statement exactly as "
             f"given, in the same order:\n{listing}",
         )
-        specs = await self._ask_predicates(messages, statements)
+        specs = await self._ask_predicates(messages, statements, _role(fn))
         errors = await self.validate(session, specs)
         if errors:
             specs = await self._repair(session, fn, specs, errors)
@@ -178,16 +180,16 @@ class PropertyProposer:
             "These predicates failed when run on a trivial input. Rewrite them, keeping every "
             f"statement exactly as given, in the same order:\n{listing}",
         )
-        fixed = await self._ask_predicates(messages, [p.statement for p in broken])
+        fixed = await self._ask_predicates(messages, [p.statement for p in broken], _role(fn))
         replacements = {old.id: new for old, new in zip(broken, fixed, strict=True)}
         for old_id, new in replacements.items():
             new.id = old_id
         return [replacements.get(p.id, p) for p in specs]
 
     async def _ask_predicates(
-        self, messages: list[Message], statements: list[str]
+        self, messages: list[Message], statements: list[str], role: Role = "fast"
     ) -> list[PropertySpec]:
-        reply = await self.llm.complete_json("fast", messages, Predicates)
+        reply = await self.llm.complete_json(role, messages, Predicates)
         drafts = reply.properties
         if len(drafts) != len(statements):
             raise PropertyValidationError(
@@ -215,7 +217,16 @@ class PropertyProposer:
                     f"Docstring: {fn.docstring or '(none)'}\n\n"
                     f"Code:\n```python\n{session.code}\n```\n\n{task}\n\n"
                     + PREDICATE_RULES.format(
-                        params=params, conventions=CONVENTIONS, stateful=stateful
+                        first="ops" if isinstance(fn, ClassInfo) else "args",
+                        inputs=(
+                            "`ops` is the list of operations and `output` the list of results, "
+                            "as described below."
+                            if isinstance(fn, ClassInfo)
+                            else f"`args` is a TUPLE of the positional arguments ({params}); "
+                            "`output` is the return value."
+                        ),
+                        conventions=CONVENTIONS,
+                        stateful=stateful,
                     )
                 ),
             },
@@ -252,3 +263,9 @@ def trivial_inputs(session: Session) -> list[tuple[Any, ...]]:
 
 def _signature(fn: Target) -> str:
     return fn.signature() if isinstance(fn, ClassInfo) else f"Signature: {fn.signature()}"
+
+
+def _role(fn: Target) -> Role:
+    """A class's spec replays a whole call sequence on a model of a correct object, which
+    the fast model gets wrong too often; it goes to the deep model."""
+    return "deep" if isinstance(fn, ClassInfo) else "fast"

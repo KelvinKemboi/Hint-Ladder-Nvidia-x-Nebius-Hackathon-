@@ -56,10 +56,10 @@ GET_MATCHES_MODEL = (
     "                model.popitem(last=False)\n"
     "    return True\n",
 )
-PUT_RETURNS_NONE = (
+PUT_RETURNS_NONE = (  # the check(ops, output) form models tend to write for a class
     "put returns None",
-    "def check(args, output):\n"
-    "    return all(r is None for (name, *_), r in zip(args[0], output) if name == 'put')\n",
+    "def check(ops, output):\n"
+    "    return all(r is None for (name, *_), r in zip(ops, output) if name == 'put')\n",
 )
 GET_NEVER_INVENTS = (
     "get only returns -1 or a value that was put",
@@ -181,6 +181,14 @@ def test_a_crashing_method_is_found_too():
     assert ce.exception_type == "KeyError"
     assert ce.call == "cache = LRUCache(1); cache.get(1)"
     assert ce.exception_line == 14
+
+
+def test_a_class_predicate_may_take_the_operations_directly():
+    takes_ops = load_predicate(PUT_RETURNS_NONE[1])
+    takes_args = load_predicate(GET_MATCHES_MODEL[1])
+    ops = [["LRUCache", 1], ["put", 1, 1], ["get", 1]]
+    assert takes_ops((ops,), [None, None, 1]) and takes_args((ops,), [None, None, 1])
+    assert not takes_ops((ops,), [None, 5, 1])
 
 
 def test_a_class_strategy_needs_every_method_with_the_right_arity():

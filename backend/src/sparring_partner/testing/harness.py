@@ -37,12 +37,20 @@ def _target(solution: Any, config: dict[str, Any]) -> Callable[..., Any]:
 
 
 def load_predicate(source: str) -> Callable[[tuple[Any, ...], Any], Any]:
-    """Compile a property's predicate source, which must define `check(args, output)`."""
+    """Compile a property's predicate source, which must define `check(args, output)`.
+
+    For a class it may define `check(ops, output)` instead, taking the operation list
+    itself rather than the argument tuple `(ops,)` that holds it.
+    """
     namespace: dict[str, Any] = {}
     exec(compile(source, "<property>", "exec"), namespace)
     check = namespace.get("check")
     if not callable(check):
         raise ValueError("predicate must define check(args, output)")
+    code = getattr(check, "__code__", None)
+    if code is not None and code.co_argcount >= 1 and code.co_varnames[0] == "ops":
+        takes_ops = check
+        return lambda args, output: takes_ops(args[0], output)
     return check
 
 

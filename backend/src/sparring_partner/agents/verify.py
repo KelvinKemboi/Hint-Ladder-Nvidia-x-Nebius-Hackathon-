@@ -13,6 +13,7 @@ seed, so progress ("verified on 300/500") can be reported as they finish.
 import ast
 import asyncio
 import difflib
+import logging
 import math
 import random
 from collections.abc import Callable
@@ -37,6 +38,8 @@ from sparring_partner.testing.counterexamples import Counterexample, dedupe
 
 SHIFTS = (1, 2, 3, 7, -1, -4)
 TRIVIAL = {"0", "1", "-1", "2", "True", "False", "None", "''", "[]", "()", "{}", "0.0"}
+
+logger = logging.getLogger(__name__)
 
 Progress = Callable[[int, int], None]  # (fresh inputs checked per property, of N)
 
@@ -123,6 +126,13 @@ def shifted(value: Any, k: int) -> Any:
         return tuple(shifted(v, k) for v in value)
     if isinstance(value, dict):
         return {key: shifted(v, k) for key, v in value.items()}
+    return value
+
+
+def _as_lists(value: Any) -> Any:
+    """Tuples nested in a value as lists, the shape the input kinds use."""
+    if isinstance(value, list | tuple):
+        return [_as_lists(v) for v in value]
     return value
 
 
@@ -278,8 +288,8 @@ async def next_risk(
     """A risk the tests may not have covered, and its counterexample if the code fails it."""
     tested = sorted({case.label for case in edge_cases(session.params)})
     shape = (
-        "\nThe example input is an argument tuple holding one operation list: "
-        + OPERATIONS.format(cls=session.function, example="...").replace("args[0]", "it")
+        "\nThe example input is the one-element argument tuple (ops,), where "
+        + OPERATIONS.format(cls=session.function, example="...")
         if session.stateful
         else ""
     )
@@ -299,7 +309,14 @@ async def next_risk(
         },
     ]
     draft = await llm.complete_json("deep", messages, RiskDraft)
+    logger.info("next risk: %r with %r", draft.question, draft.example_args)
     args = _literal_args(draft.example_args, len(session.params) or 1)
+    if args is not None and len(args) == len(session.params):
+        # [(5, 6), (1, 2)] is the same intervals as [[5, 6], [1, 2]]
+        args = tuple(
+            _as_lists(arg) if p.kind in ("intervals", "sorted_intervals") else arg
+            for arg, p in zip(args, session.params, strict=True)
+        )
     # Not strict: a risk is often an input the code assumed away, like unsorted input.
     if args is None or not args_fit(args, session.params, session.methods, strict=False):
         return draft.question, None
