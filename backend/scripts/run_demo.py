@@ -33,6 +33,9 @@ class Demo:
     intent: str
     fix: Callable[[str], str]  # the learner's fix, applied to the demo code
     reference: Callable[[str], str]  # a fully correct version, for the predictions
+    # What the learner adds at property review, as a presenter would on stage: the
+    # spec the demo is about, in case the model's proposals don't cover it.
+    adds: str | None = None
 
 
 DEMOS = {
@@ -46,7 +49,8 @@ DEMOS = {
         ).replace(
             "    merged = [intervals[0]]",
             "    intervals = sorted(map(list, intervals))\n    merged = [intervals[0]]",
-        ),  # fmt: skip
+        ),
+        adds="No two output intervals overlap or touch: [1, 4] and [4, 5] merge into [1, 5].",
     ),
     "search": Demo(
         "Demo 2: binary search that can stop making progress",
@@ -68,6 +72,9 @@ DEMOS = {
             "        return self.cache[key]\n",
             "        self.cache.move_to_end(key)\n        return self.cache[key]\n",
         ),
+        adds="get(key) returns the value most recently put for key, or -1 if it was never "
+        "put or was evicted; a get counts as a use, so the evicted key is always the one "
+        "least recently put or read.",
     ),
 }
 
@@ -149,6 +156,9 @@ async def run(name: str, url: str, out: Path) -> None:
         rec.say()
         rec.say("## The hunt")
         keep = [{"id": p["id"], "statement": p["statement"]} for p in session["properties"]]
+        if demo.adds:
+            keep.append({"id": None, "statement": demo.adds})
+            rec.event("learner adds", demo.adds)
         (
             await client.put(f"/api/sessions/{sid}/properties", json={"properties": keep})
         ).raise_for_status()

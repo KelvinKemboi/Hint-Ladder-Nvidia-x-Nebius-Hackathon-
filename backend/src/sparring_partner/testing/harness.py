@@ -108,8 +108,10 @@ def _is_int(value: Any) -> bool:
 
 
 def _is_interval(value: Any) -> bool:
+    """A [start, end] list. Not a tuple: code that updates an interval in place (common in
+    merging) would fail on tuples for a reason the intent never asked about."""
     return (
-        isinstance(value, list | tuple)
+        isinstance(value, list)
         and len(value) == 2
         and all(_is_int(v) for v in value)
         and value[0] <= value[1]

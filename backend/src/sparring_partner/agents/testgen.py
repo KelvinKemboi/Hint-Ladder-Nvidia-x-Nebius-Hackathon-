@@ -231,6 +231,9 @@ async def infer_inputs(llm: JsonLLM, fn: FunctionInfo, intent: str, code: str) -
     return InputInfo(params, example, worked)
 
 
+MAX_EXAMPLE_CALLS = 4
+
+
 class OperationExamples(BaseModel):
     examples: list[WorkedExample] = Field(min_length=1, max_length=4)
 
@@ -248,9 +251,11 @@ async def infer_operations(llm: JsonLLM, cls: ClassInfo, intent: str, code: str)
             "role": "user",
             "content": (
                 f"Intent: {intent}\n\n{cls.signature()}\n\nCode:\n```python\n{code}\n```\n\n"
-                "Give 2 to 4 worked examples, each a short sequence of operations and the outputs "
-                "a CORRECT implementation of the intent returns (not what this code returns; it "
-                "may be buggy). Include one that exercises a limit or boundary.\n"
+                "Give 2 to 4 worked examples, each a short sequence of operations (at most "
+                f"{MAX_EXAMPLE_CALLS} calls after the constructor) and the outputs a CORRECT "
+                "implementation of the intent returns (not what this code returns; it may be "
+                "buggy). Include one that exercises a limit or boundary. Work out each output "
+                "step by step before writing it down.\n"
                 + OPERATIONS.format(cls=cls.name, example=operations_example(cls))
                 + "\nargs is the argument tuple, so write it as a one-element tuple: "
                 "'([[...], [...]],)'. output is the list of results."
@@ -266,9 +271,12 @@ async def infer_operations(llm: JsonLLM, cls: ClassInfo, intent: str, code: str)
                 output = ast.literal_eval(example.output)
             except (ValueError, SyntaxError):
                 continue
+            # Longer sequences are where a model's own "correct" outputs go wrong, and a
+            # wrong example would get a correct property thrown out.
             if (
                 args is not None
                 and args_fit(args, params, cls.arities())
+                and len(args[0]) - 1 <= MAX_EXAMPLE_CALLS
                 and isinstance(output, list)
             ):
                 worked.append((args, output))
@@ -479,7 +487,9 @@ async def write_strategy(
 
 def _strategy_task(session: Session, fn: Target) -> str:
     if isinstance(fn, ClassInfo):
-        keys = ", ".join(repr(name) for name in session.methods)
+        keys = ", ".join(
+            f"{name!r}: {n} argument{'' if n == 1 else 's'}" for name, n in session.methods.items()
+        )
         return (
             f"Intent: {session.intent}\n\n{fn.signature()}\n\n"
             "The class is tested as a state machine: Hypothesis creates an object, then calls "
