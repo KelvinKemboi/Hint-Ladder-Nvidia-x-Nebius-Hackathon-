@@ -8,6 +8,7 @@ Roles map to models in config (docs/PROJECT_OUTLINE.md §5.2):
 
 import json
 import logging
+import os
 import re
 import time
 from collections import defaultdict
@@ -15,7 +16,7 @@ from dataclasses import dataclass, field
 from functools import lru_cache
 from typing import Any, Literal, TypeVar
 
-from openai import AsyncOpenAI
+from openai import AsyncOpenAI, AuthenticationError, NotFoundError, PermissionDeniedError
 from pydantic import BaseModel, ValidationError
 
 from sparring_partner.config import Settings, get_settings
@@ -25,6 +26,23 @@ logger = logging.getLogger(__name__)
 Role = Literal["fast", "deep", "gate"]
 Message = dict[str, Any]
 SchemaT = TypeVar("SchemaT", bound=BaseModel)
+
+RESTART = "Fix it in .env, then restart the server (settings are read at startup)."
+
+
+def how_to_fix(setting: str) -> str:
+    """Where the bad value comes from: a shell variable overrides .env."""
+    if setting in os.environ:
+        return (
+            f"{setting} is set in the shell that started the server, which overrides .env: "
+            f"run `unset {setting}` there (or open a new terminal), then restart the server."
+        )
+    return RESTART
+
+
+class ModelConfigError(ValueError):
+    """Token Factory can't serve the configured model or key: a setup problem, not a bug."""
+
 
 _THINK = re.compile(r"<think>.*?</think>", re.DOTALL)
 _FENCE = re.compile(r"```(?:json)?\s*(.*?)```", re.DOTALL)
@@ -87,16 +105,30 @@ class LLM:
             "gate": self.settings.model_gate,
         }[role]
         if not model:
-            raise ValueError(f"No model configured for role {role!r}; set MODEL_{role.upper()}")
+            raise ModelConfigError(
+                f"No model configured for role {role!r}; set MODEL_{role.upper()}. "
+                + how_to_fix(f"MODEL_{role.upper()}")
+            )
         return model
 
     async def complete(self, role: Role, messages: list[Message], **kwargs: Any) -> Completion:
         """One chat completion on the model for `role`; extra kwargs go to the API."""
         model = self.model_for(role)
         start = time.perf_counter()
-        response = await self.client.chat.completions.create(
-            model=model, messages=messages, **kwargs
-        )
+        try:
+            response = await self.client.chat.completions.create(
+                model=model, messages=messages, **kwargs
+            )
+        except NotFoundError as exc:
+            raise ModelConfigError(
+                f"Token Factory has no model {model!r} (MODEL_{role.upper()}). "
+                + how_to_fix(f"MODEL_{role.upper()}")
+            ) from exc
+        except (AuthenticationError, PermissionDeniedError) as exc:
+            raise ModelConfigError(
+                "Token Factory rejected the API key (NEBIUS_API_KEY). "
+                + how_to_fix("NEBIUS_API_KEY")
+            ) from exc
         latency = time.perf_counter() - start
 
         usage = response.usage

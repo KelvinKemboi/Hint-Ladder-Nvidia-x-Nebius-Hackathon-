@@ -1,10 +1,12 @@
 from types import SimpleNamespace
 
+import httpx
 import pytest
+from openai import NotFoundError
 from pydantic import BaseModel
 
 from sparring_partner.config import Settings
-from sparring_partner.llm import LLM, StructuredOutputError, extract_json
+from sparring_partner.llm import LLM, ModelConfigError, StructuredOutputError, extract_json
 
 pytestmark = pytest.mark.anyio
 
@@ -48,6 +50,33 @@ async def test_missing_model_is_a_clear_error():
     llm, _ = make_llm("x", model_deep="")
     with pytest.raises(ValueError, match="MODEL_DEEP"):
         await llm.complete("deep", [])
+
+
+async def test_unknown_model_names_the_setting_to_fix(monkeypatch):
+    monkeypatch.delenv("MODEL_FAST", raising=False)
+    llm, completions = make_llm(model_fast="your_model_id_here")
+
+    async def not_found(**kwargs):
+        request = httpx.Request("POST", "https://example.test/v1/chat/completions")
+        response = httpx.Response(404, request=request)
+        raise NotFoundError("The model does not exist.", response=response, body=None)
+
+    completions.create = not_found
+    with pytest.raises(ModelConfigError, match="'your_model_id_here' .MODEL_FAST.*restart"):
+        await llm.complete("fast", [])
+
+
+async def test_a_shell_variable_overriding_env_is_named(monkeypatch):
+    monkeypatch.setenv("MODEL_FAST", "your_model_id_here")
+    llm, completions = make_llm(model_fast="your_model_id_here")
+
+    async def not_found(**kwargs):
+        request = httpx.Request("POST", "https://example.test/v1/chat/completions")
+        raise NotFoundError("nope", response=httpx.Response(404, request=request), body=None)
+
+    completions.create = not_found
+    with pytest.raises(ModelConfigError, match="set in the shell.*unset MODEL_FAST"):
+        await llm.complete("fast", [])
 
 
 async def test_records_latency_and_tokens():

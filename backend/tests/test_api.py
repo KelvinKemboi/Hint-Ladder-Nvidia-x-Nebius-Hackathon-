@@ -14,6 +14,7 @@ from fakes import (
 )
 
 from sparring_partner.api.sessions import SessionOut
+from sparring_partner.llm import ModelConfigError
 from sparring_partner.main import app
 
 # Fields that must never reach the client.
@@ -317,3 +318,14 @@ def test_stream_for_unknown_session_closes(make_client):
     ):
         ws.receive_json()
     assert closed.value.code == 4404
+
+
+def test_a_wrong_model_id_is_a_503_that_says_what_to_fix(make_client):
+    def unknown_model(messages):
+        raise ModelConfigError("Token Factory has no model 'your_model_id_here' (MODEL_FAST).")
+
+    client, _ = make_client(FakeLLM(Proposal=[unknown_model], InputSpec=[unknown_model]))
+    response = client.post("/api/sessions", json={"code": MERGE_CODE, "intent": "merge intervals"})
+
+    assert response.status_code == 503
+    assert "MODEL_FAST" in response.json()["detail"]

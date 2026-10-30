@@ -17,7 +17,7 @@ from sparring_partner.agents.errors import GenerationError, NotAvailable, UserCo
 from sparring_partner.agents.predict import PredictionParseError
 from sparring_partner.agents.properties import PropertyValidationError
 from sparring_partner.config import get_settings
-from sparring_partner.llm import StructuredOutputError, get_llm
+from sparring_partner.llm import ModelConfigError, StructuredOutputError, get_llm
 from sparring_partner.orchestrator import Orchestrator
 from sparring_partner.sandbox import SandboxConfigError, get_sandbox
 from sparring_partner.session import (
@@ -209,7 +209,7 @@ def _errors() -> Iterator[None]:
         raise HTTPException(409, str(exc)) from exc
     except (GenerationError, StructuredOutputError) as exc:
         raise HTTPException(502, f"the model could not complete this step: {exc}") from exc
-    except SandboxConfigError as exc:
+    except (SandboxConfigError, ModelConfigError) as exc:
         raise HTTPException(503, str(exc)) from exc
 
 

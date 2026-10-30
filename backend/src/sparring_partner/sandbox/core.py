@@ -11,6 +11,7 @@ from sparring_partner.sandbox.backends import (
     RUNNER,
     Backend,
     ContreeBackend,
+    DockerBackend,
     LocalBackend,
     RawRun,
 )
@@ -138,7 +139,11 @@ _PAYLOAD_FIELDS = ("stdout", "stderr", "error", "value", "outcomes")
 @lru_cache
 def get_sandbox() -> Sandbox:
     settings = get_settings()
-    backend: Backend = (
-        LocalBackend() if settings.sandbox_backend == "local" else ContreeBackend(settings)
-    )
+    backend: Backend
+    if settings.sandbox_backend == "local":
+        backend = LocalBackend()
+    elif settings.sandbox_backend == "docker":
+        backend = DockerBackend(settings)
+    else:
+        backend = ContreeBackend(settings)
     return Sandbox(backend, settings)

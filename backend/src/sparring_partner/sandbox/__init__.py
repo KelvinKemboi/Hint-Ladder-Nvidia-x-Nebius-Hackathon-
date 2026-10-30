@@ -2,6 +2,7 @@
 
 from sparring_partner.sandbox.backends import (
     ContreeBackend,
+    DockerBackend,
     LocalBackend,
     SandboxConfigError,
 )
@@ -11,6 +12,7 @@ from sparring_partner.sandbox.models import CallOutcome, ErrorInfo, RunResult
 __all__ = [
     "CallOutcome",
     "ContreeBackend",
+    "DockerBackend",
     "ErrorInfo",
     "LocalBackend",
     "RunResult",

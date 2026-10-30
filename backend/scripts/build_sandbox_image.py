@@ -1,17 +1,20 @@
-"""Build the Token Factory sandbox image: Python 3.12 + Hypothesis, tagged SANDBOX_IMAGE.
+"""Build the sandbox image: Python 3.12 + Hypothesis, tagged SANDBOX_IMAGE.
 
-Run once per account (and again after bumping Hypothesis):
+Token Factory sandbox (run once per account, and again after bumping Hypothesis):
     uv run python scripts/build_sandbox_image.py
-Then check it with a real run:
     uv run python scripts/build_sandbox_image.py --check
+Local Docker instead (SANDBOX_BACKEND=docker), e.g. until you have Sandboxes access:
+    uv run python scripts/build_sandbox_image.py --docker
+    uv run python scripts/build_sandbox_image.py --docker --check
 """
 
 import argparse
 import asyncio
+import subprocess
 from importlib.metadata import version
 
 from sparring_partner.config import get_settings
-from sparring_partner.sandbox import ContreeBackend, Sandbox
+from sparring_partner.sandbox import ContreeBackend, DockerBackend, Sandbox
 
 BASE_IMAGE = "python:3.12-slim"
 
@@ -35,9 +38,26 @@ async def build() -> None:
     print(f"Built {settings.sandbox_image} ({image.uuid})")
 
 
-async def check() -> None:
+def build_docker() -> None:
     settings = get_settings()
-    sandbox = Sandbox(ContreeBackend(settings), settings)
+    hypothesis = f"hypothesis=={version('hypothesis')}"
+    dockerfile = (
+        f"FROM {BASE_IMAGE}\n"
+        f"RUN pip install --no-cache-dir '{hypothesis}' && python3 -c 'import hypothesis'\n"
+    )
+    print(f"Building {settings.sandbox_image} ({BASE_IMAGE} + {hypothesis}) with Docker ...")
+    subprocess.run(
+        ["docker", "build", "-t", settings.sandbox_image, "-"],
+        input=dockerfile.encode(),
+        check=True,
+    )
+    print(f"Built {settings.sandbox_image}. Set SANDBOX_BACKEND=docker in .env to use it.")
+
+
+async def check(docker: bool) -> None:
+    settings = get_settings()
+    backend = DockerBackend(settings) if docker else ContreeBackend(settings)
+    sandbox = Sandbox(backend, settings)
     harness = "import hypothesis\ndef run(solution, inputs):\n    return hypothesis.__version__\n"
     result = await sandbox.run("x = 1", harness)
     print(result.model_dump_json(indent=2))
@@ -50,4 +70,11 @@ async def check() -> None:
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--check", action="store_true", help="run a smoke test instead")
-    asyncio.run(check() if parser.parse_args().check else build())
+    parser.add_argument("--docker", action="store_true", help="use local Docker, not Token Factory")
+    args = parser.parse_args()
+    if args.check:
+        asyncio.run(check(args.docker))
+    elif args.docker:
+        build_docker()
+    else:
+        asyncio.run(build())

@@ -1,4 +1,8 @@
+import asyncio
+import shutil
+import subprocess
 import sys
+from functools import cache
 from types import SimpleNamespace
 
 import pytest
@@ -6,6 +10,7 @@ import pytest
 from sparring_partner.config import Settings
 from sparring_partner.sandbox import (
     ContreeBackend,
+    DockerBackend,
     LocalBackend,
     Sandbox,
     SandboxConfigError,
@@ -35,8 +40,24 @@ print("loaded")
 """
 
 
-@pytest.fixture
-def sandbox():
+@cache
+def docker_ready() -> bool:
+    """Docker is running and the sandbox image is built (not the case in CI)."""
+    if shutil.which("docker") is None:
+        return False
+    found = subprocess.run(
+        ["docker", "image", "inspect", SETTINGS.sandbox_image], capture_output=True, timeout=30
+    )
+    return found.returncode == 0
+
+
+# Every sandbox test runs on the local backend, and on Docker when it's available.
+@pytest.fixture(params=["local", "docker"])
+def sandbox(request):
+    if request.param == "docker":
+        if not docker_ready():
+            pytest.skip("Docker or the sandbox image isn't available")
+        return Sandbox(DockerBackend(SETTINGS), SETTINGS)
     return Sandbox(LocalBackend(), SETTINGS)
 
 
@@ -46,7 +67,7 @@ async def test_batch_runs_every_input_and_times_out_infinite_loops(sandbox):
     )
 
     assert result.ok
-    assert result.backend == "local"
+    assert result.backend == sandbox.backend.name
     assert result.stdout == "loaded\n"
     found, stuck, empty = result.outcomes
     assert found.output == "0"
@@ -125,8 +146,9 @@ async def test_except_exception_in_user_code_cannot_swallow_the_timeout(sandbox)
     assert result.outcomes[0].timed_out
 
 
-@pytest.mark.skipif(sys.platform == "darwin", reason="macOS does not enforce RLIMIT_AS")
 async def test_memory_limit(sandbox):
+    if sandbox.backend.name == "local" and sys.platform == "darwin":
+        pytest.skip("macOS does not enforce RLIMIT_AS")
     result = await sandbox.run("x = bytearray(2 * 1024 ** 3)\n")
     assert result.error.type == "MemoryError"
 
@@ -134,6 +156,64 @@ async def test_memory_limit(sandbox):
 async def test_inputs_must_be_literals(sandbox):
     with pytest.raises(ValueError, match="literals"):
         await sandbox.run_batch(BINARY_SEARCH, "first", [object()])
+
+
+# --- Docker backend: what the container can't do -------------------------------
+
+
+@pytest.fixture
+def docker_sandbox():
+    if not docker_ready():
+        pytest.skip("Docker or the sandbox image isn't available")
+    return Sandbox(DockerBackend(SETTINGS), SETTINGS)
+
+
+def returns(expression: str) -> str:
+    return f"def run(solution, inputs):\n    return {expression}\n"
+
+
+async def test_docker_has_no_network(docker_sandbox):
+    code = (
+        "import socket\n"
+        "def reach():\n"
+        "    try:\n"
+        "        socket.create_connection(('1.1.1.1', 53), timeout=2)\n"
+        "        return 'connected'\n"
+        "    except OSError as exc:\n"
+        "        return type(exc).__name__\n"
+    )
+    result = await docker_sandbox.run(code, returns("solution.reach()"))
+    assert result.ok and result.value != "connected"
+
+
+async def test_docker_filesystem_is_read_only_and_user_is_unprivileged(docker_sandbox):
+    code = (
+        "import os\n"
+        "def probe():\n"
+        "    try:\n"
+        "        open('/sandbox/x', 'w')\n"
+        "        return 'wrote'\n"
+        "    except OSError:\n"
+        "        return os.getuid()\n"
+    )
+    result = await docker_sandbox.run(code, returns("solution.probe()"))
+    assert result.value == 65534  # nobody
+
+
+async def test_docker_timeout_removes_the_container(docker_sandbox):
+    result = await docker_sandbox.run("while True:\n    pass\n", timeout_s=2)
+    assert result.timed_out
+    await asyncio.sleep(1)
+    running = subprocess.run(
+        ["docker", "ps", "-q", "--filter", "name=sparring-"], capture_output=True, text=True
+    )
+    assert running.stdout.strip() == ""
+
+
+async def test_docker_missing_image_says_how_to_build_it(docker_sandbox):
+    settings = Settings(_env_file=None, sandbox_image="sparring-partner-python:no-such-tag")
+    with pytest.raises(SandboxConfigError, match="build_sandbox_image.py --docker"):
+        await Sandbox(DockerBackend(settings), settings).run("x = 1")
 
 
 # --- Token Factory backend, with a fake ConTree client ------------------------

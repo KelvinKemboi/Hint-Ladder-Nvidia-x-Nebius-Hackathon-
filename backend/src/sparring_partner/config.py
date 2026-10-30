@@ -26,8 +26,9 @@ class Settings(BaseSettings):
     llm_timeout_s: float = 120.0
     llm_max_retries: int = 2
 
-    # "contree" = Token Factory sandbox; "local" = subprocess on this machine, dev only.
-    sandbox_backend: Literal["contree", "local"] = "contree"
+    # "contree" = Token Factory sandbox; "docker" = isolated container on this machine;
+    # "local" = plain subprocess on this machine, dev only.
+    sandbox_backend: Literal["contree", "docker", "local"] = "contree"
     sandbox_image: str = "sparring-partner-python:v1"  # built by scripts/build_sandbox_image.py
     sandbox_timeout_s: float = 60.0
     sandbox_memory_mb: int = 512
